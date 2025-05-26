@@ -1,53 +1,101 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from torchvision import transforms
 from cnn_model import CNNFeatureExtractor
 from custom_dataset import LocalImageDataset
 import os
 import numpy as np
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
 
-def train_model(model, train_loader, criterion, optimizer, device, num_epochs=10):
+def train_model(model, train_loader, val_loader, criterion, optimizer, device, num_epochs=10):
     model.train()
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
+    
     for epoch in range(num_epochs):
+        # 训练阶段
+        model.train()
         running_loss = 0.0
-        for i, (inputs, _) in enumerate(train_loader):
+        for i, (inputs, targets) in enumerate(train_loader):
             inputs = inputs.to(device)
+            targets = targets.to(device).float().view(-1, 1)  # 确保目标值的形状正确
             
             optimizer.zero_grad()
-            outputs, _ = model(inputs)
-            # 使用随机标签进行训练，因为我们只关心特征提取
-            random_labels = torch.randint(0, 10, (inputs.size(0),)).to(device)
-            loss = criterion(outputs, random_labels)
+            predictions, _ = model(inputs)
+            loss = criterion(predictions, targets)
             loss.backward()
             optimizer.step()
             
             running_loss += loss.item()
-            if i % 10 == 9:  # 更频繁地打印损失
-                print(f'[Epoch {epoch + 1}, Batch {i + 1}] Loss: {running_loss / 10:.3f}')
+            if i % 10 == 9:
+                print(f'[Epoch {epoch + 1}, Batch {i + 1}] 训练损失: {running_loss / 10:.3f}')
                 running_loss = 0.0
+        
+        # 验证阶段
+        model.eval()
+        val_loss = 0.0
+        val_predictions = []
+        val_targets = []
+        
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs = inputs.to(device)
+                targets = targets.to(device).float().view(-1, 1)
+                predictions, _ = model(inputs)
+                loss = criterion(predictions, targets)
+                val_loss += loss.item()
+                
+                val_predictions.extend(predictions.cpu().numpy())
+                val_targets.extend(targets.cpu().numpy())
+        
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+        
+        # 计算R²分数
+        r2 = r2_score(val_targets, val_predictions)
+        
+        print(f'Epoch {epoch + 1} 验证损失: {val_loss:.3f}, R² 分数: {r2:.3f}')
+        
+        # 保存最佳模型
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), 'best_model.pth')
+            print(f'保存最佳模型，验证损失: {val_loss:.3f}')
+        
+        # 绘制验证集上的预测值与真实值对比
+        if epoch % 5 == 0:
+            plt.figure(figsize=(10, 6))
+            plt.scatter(val_targets, val_predictions, alpha=0.5)
+            plt.plot([min(val_targets), max(val_targets)], [min(val_targets), max(val_targets)], 'r--')
+            plt.xlabel('真实浓度值')
+            plt.ylabel('预测浓度值')
+            plt.title(f'Epoch {epoch + 1} 预测值 vs 真实值 (R² = {r2:.3f})')
+            plt.savefig(f'prediction_plot_epoch_{epoch + 1}.png')
+            plt.close()
 
-def extract_features(model, dataloader, device):
+def evaluate_model(model, test_loader, device):
     model.eval()
-    features = []
-    file_paths = []
-    with torch.no_grad():
-        for i, (inputs, _) in enumerate(dataloader):
-            inputs = inputs.to(device)
-            _, batch_features = model(inputs)
-            features.append(batch_features.cpu())
-            
-            # 获取当前批次的文件路径
-            start_idx = i * dataloader.batch_size
-            end_idx = start_idx + inputs.size(0)
-            file_paths.extend(dataloader.dataset.image_files[start_idx:end_idx])
-            
-            if i % 10 == 0:  # 更频繁地打印进度
-                print(f"已处理 {i * dataloader.batch_size} 张图像")
+    predictions = []
+    targets = []
     
-    features = torch.cat(features, 0)
-    return features, file_paths
+    with torch.no_grad():
+        for inputs, target in test_loader:
+            inputs = inputs.to(device)
+            pred, _ = model(inputs)
+            predictions.extend(pred.cpu().numpy())
+            targets.extend(target.numpy())
+    
+    predictions = np.array(predictions)
+    targets = np.array(targets)
+    
+    mse = mean_squared_error(targets, predictions)
+    r2 = r2_score(targets, predictions)
+    
+    return mse, r2, predictions, targets
 
 def main():
     # 设置设备
@@ -56,63 +104,68 @@ def main():
     
     # 数据预处理
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # 调整为更大的尺寸
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                            std=[0.229, 0.224, 0.225])
     ])
     
-    # 加载本地数据集
+    # 加载数据集
     dataset_path = r"D:\2025年实验照片"
-    dataset = LocalImageDataset(root_dir=dataset_path, transform=transform)
-    print(f"数据集根目录: {dataset_path}")
+    full_dataset = LocalImageDataset(root_dir=dataset_path, transform=transform)
     
-    if len(dataset) == 0:
-        print("错误：未找到任何图像文件！请检查路径是否正确。")
+    if len(full_dataset) == 0:
+        print("错误：未找到任何有效的图像文件！")
         return
     
-    # 使用较小的batch_size以适应更大的图像
-    batch_size = 16  # 减小批次大小以适应更大的图像
-    dataloader = DataLoader(dataset, batch_size=batch_size, 
-                          shuffle=True, 
-                          num_workers=2,
-                          pin_memory=True)  # 启用pin_memory以加速数据传输
+    # 划分数据集
+    train_size = int(0.7 * len(full_dataset))
+    val_size = int(0.15 * len(full_dataset))
+    test_size = len(full_dataset) - train_size - val_size
+    
+    train_dataset, val_dataset, test_dataset = random_split(
+        full_dataset, [train_size, val_size, test_size]
+    )
+    
+    print(f"数据集划分:")
+    print(f"训练集: {len(train_dataset)} 张图像")
+    print(f"验证集: {len(val_dataset)} 张图像")
+    print(f"测试集: {len(test_dataset)} 张图像")
+    
+    # 创建数据加载器
+    batch_size = 16
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
     
     # 创建模型实例
-    model = CNNFeatureExtractor(num_classes=10).to(device)
+    model = CNNFeatureExtractor().to(device)
     
     # 定义损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.MSELoss()  # 使用均方误差损失
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
     # 训练模型
-    print("开始训练模型...")
-    print(f"总图像数量: {len(dataset)}")
-    print(f"批次大小: {batch_size}")
-    print(f"每轮训练批次数: {len(dataloader)}")
+    print("\n开始训练模型...")
+    train_model(model, train_loader, val_loader, criterion, optimizer, device, num_epochs=30)
     
-    train_model(model, dataloader, criterion, optimizer, device, num_epochs=5)
+    # 加载最佳模型进行测试
+    model.load_state_dict(torch.load('best_model.pth'))
+    mse, r2, predictions, targets = evaluate_model(model, test_loader, device)
     
-    # 提取特征
-    print("\n开始提取特征...")
-    features, file_paths = extract_features(model, dataloader, device)
+    print("\n测试集结果:")
+    print(f"均方误差 (MSE): {mse:.3f}")
+    print(f"R² 分数: {r2:.3f}")
     
-    # 保存特征和对应的文件路径
-    output_dir = "extracted_features"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    features_np = features.numpy()
-    np.save(os.path.join(output_dir, "features.npy"), features_np)
-    
-    # 保存文件路径列表
-    with open(os.path.join(output_dir, "file_paths.txt"), "w", encoding="utf-8") as f:
-        for path in file_paths:
-            f.write(f"{path}\n")
-    
-    print(f"\n特征提取完成:")
-    print(f"特征形状: {features.shape}")
-    print(f"特征已保存到 {output_dir} 目录")
-    print(f"处理的总图像数量: {len(dataset)}")
+    # 绘制最终的预测结果
+    plt.figure(figsize=(10, 6))
+    plt.scatter(targets, predictions, alpha=0.5)
+    plt.plot([min(targets), max(targets)], [min(targets), max(targets)], 'r--')
+    plt.xlabel('真实浓度值')
+    plt.ylabel('预测浓度值')
+    plt.title(f'测试集预测结果 (R² = {r2:.3f})')
+    plt.savefig('final_prediction_plot.png')
+    plt.close()
 
 if __name__ == '__main__':
     main() 
