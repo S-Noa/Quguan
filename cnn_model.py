@@ -30,6 +30,7 @@ class CNNFeatureExtractor(nn.Module):
         self.conv5 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         self.bn5 = nn.BatchNorm2d(512)
         self.pool5 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.last_conv = self.conv5  # 便于grad-cam可视化
         
         # 全连接层
         self.fc1 = nn.Linear(512 * 7 * 7, 1024)
