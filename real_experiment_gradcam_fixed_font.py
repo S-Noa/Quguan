@@ -127,7 +127,22 @@ def parse_filename(filename):
 
 def find_real_experiment_images():
     """查找真实实验图像"""
-    base_path = r"D:\2025年实验照片"
+    # 数据路径 - 优先使用干净数据集
+    possible_base_paths = [
+        r"D:\2025年实验照片_no_timestamp",  # 干净数据集（优先）
+        r"D:\2025年实验照片"  # 原始数据集（备用）
+    ]
+    
+    base_path = None
+    for path in possible_base_paths:
+        if os.path.exists(path):
+            base_path = path
+            print(f"使用数据集路径: {base_path}")
+            break
+    
+    if base_path is None:
+        print("错误：未找到数据集！")
+        return
     
     # 定义要查找的特定图像
     target_images = [

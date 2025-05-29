@@ -17,6 +17,8 @@ from PIL import Image
 
 # 导入字体设置工具
 from font_utils import CHINESE_SUPPORTED, get_labels, suppress_font_warnings
+# 导入训练监控模块
+from training_monitor import TrainingMonitor
 
 # 抑制字体警告
 suppress_font_warnings()
@@ -172,43 +174,6 @@ class VGGRegressionCBAM(nn.Module):
         x = self.reg_head(x)
         return x
 
-# Grad-CAM可视化工具
-class GradCAM:
-    def __init__(self, model, target_layer):
-        self.model = model
-        self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
-        self.hook_handles = []
-        self._register_hooks()
-    def _register_hooks(self):
-        def forward_hook(module, input, output):
-            self.activations = output.detach()
-        def backward_hook(module, grad_in, grad_out):
-            self.gradients = grad_out[0].detach()
-        handle1 = self.target_layer.register_forward_hook(forward_hook)
-        handle2 = self.target_layer.register_backward_hook(backward_hook)
-        self.hook_handles.extend([handle1, handle2])
-    def remove_hooks(self):
-        for handle in self.hook_handles:
-            handle.remove()
-    def __call__(self, input_tensor, target_index=None):
-        self.model.eval()
-        output = self.model(input_tensor)
-        if target_index is None:
-            target_index = 0
-        loss = output[:, 0].sum() if output.ndim == 2 else output.sum()
-        self.model.zero_grad()
-        loss.backward(retain_graph=True)
-        weights = self.gradients.mean(dim=[2, 3], keepdim=True)
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)
-        cam = torch.relu(cam)
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-8)
-        cam = cam.squeeze().cpu().numpy()
-        self.remove_hooks()
-        return cam
-
 def train_model(model, train_loader, val_loader, criterion, optimizer, device, num_epochs=30, start_epoch=0, use_amp=True, scheduler=None, model_save_path='best_vgg_model.pth'):
     best_val_loss = float('inf')
     patience_counter = 0
@@ -218,6 +183,28 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, n
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
     
     print(f"训练配置: 早停耐心值={early_stop_patience}, 梯度裁剪=1.0, 混合精度={use_amp}, 权重衰减=1e-4", flush=True)
+    
+    # 初始化训练监控器
+    monitor_dir = 'monitoring_results_vgg'
+    if 'bg0' in model_save_path:
+        monitor_dir = 'monitoring_results_vgg_bg0'
+    elif 'bg1' in model_save_path:
+        monitor_dir = 'monitoring_results_vgg_bg1'
+    
+    training_monitor = TrainingMonitor(model_type='vgg', save_dir=monitor_dir, device=device)
+    print(f"训练监控器已初始化，结果保存至: {monitor_dir}", flush=True)
+    
+    # 获取一个样本图像用于监控
+    sample_image = None
+    sample_concentration = None
+    try:
+        for inputs, targets in val_loader:
+            sample_image = inputs[0]  # 取第一张图像
+            sample_concentration = targets[0].item()
+            break
+        print(f"获取监控样本图像成功，浓度: {sample_concentration}", flush=True)
+    except Exception as e:
+        print(f"获取监控样本图像失败: {e}", flush=True)
     
     for epoch in range(start_epoch, num_epochs):
         model.train()
@@ -356,20 +343,67 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, n
                 print(f'早停触发！连续{early_stop_patience}个epoch验证损失未改善，停止训练。')
                 break
         
+        # 每5个epoch生成预测图和Grad-CAM监控
         if epoch % 5 == 0:
-            # 获取标签
-            labels = get_labels(CHINESE_SUPPORTED)
-            
-            plt.figure(figsize=(10, 6))
-            plt.scatter(val_targets, val_predictions, alpha=0.5)
-            plt.plot([min(val_targets), max(val_targets)], [min(val_targets), max(val_targets)], 'r--')
-            plt.xlabel(labels['true_concentration'])
-            plt.ylabel(labels['predicted_concentration'])
-            plt.title(f"{labels['epoch']} {epoch + 1} {labels['prediction_vs_true']} (R² = {r2:.3f})")
-            plt.savefig(f'vgg_prediction_plot_epoch_{epoch + 1}.png')
-            plt.close()
+            try:
+                # 获取标签
+                labels = get_labels(CHINESE_SUPPORTED)
+                
+                # 生成预测对比图
+                plt.figure(figsize=(10, 6))
+                plt.scatter(val_targets, val_predictions, alpha=0.5)
+                plt.plot([min(val_targets), max(val_targets)], [min(val_targets), max(val_targets)], 'r--')
+                plt.xlabel(labels['true_concentration'])
+                plt.ylabel(labels['predicted_concentration'])
+                plt.title(f"{labels['epoch']} {epoch + 1} {labels['prediction_vs_true']} (R² = {r2:.3f})")
+                prediction_plot_path = f'vgg_prediction_plot_epoch_{epoch + 1}.png'
+                plt.savefig(prediction_plot_path)
+                plt.close()
+                print(f'✓ 预测对比图已保存: {prediction_plot_path}', flush=True)
+                
+                # 生成Grad-CAM监控（如果有样本图像）
+                if sample_image is not None:
+                    print(f"正在生成Epoch {epoch + 1}的Grad-CAM监控...", flush=True)
+                    analysis_result = training_monitor.visualize_gradcam_with_regions(
+                        model, sample_image, epoch + 1, 
+                        save_name=f'vgg_gradcam_epoch_{epoch + 1}'
+                    )
+                    
+                    if analysis_result:
+                        # 记录监控结果
+                        regions_attention = analysis_result['regions_attention']
+                        attention_ratios = analysis_result['attention_ratios']
+                        
+                        print(f"=== Epoch {epoch + 1} 注意力分析 ===", flush=True)
+                        print(f"中心区域注意力: {regions_attention['center']:.3f}", flush=True)
+                        print(f"水印区域注意力(中): {regions_attention['watermark_medium']:.3f}", flush=True)
+                        print(f"水印/中心注意力比例: {attention_ratios['medium_ratio']:.3f}", flush=True)
+                        
+                        # 检查是否有警告
+                        has_warning, warning_msg = training_monitor.check_watermark_attention(analysis_result)
+                        if has_warning:
+                            print(f"⚠️ 注意力警告: {warning_msg}", flush=True)
+                        else:
+                            print("✓ 注意力分布正常", flush=True)
+                
+            except Exception as e:
+                print(f"生成监控可视化时出错: {e}", flush=True)
     
     print(f"训练完成！最佳验证损失: {best_val_loss:.3f}", flush=True)
+    
+    # 生成最终监控报告
+    try:
+        report_name = 'vgg_training_monitoring_report'
+        if 'bg0' in model_save_path:
+            report_name = 'vgg_training_monitoring_report_bg0'
+        elif 'bg1' in model_save_path:
+            report_name = 'vgg_training_monitoring_report_bg1'
+        
+        report_path = training_monitor.generate_monitoring_report(save_name=report_name)
+        if report_path:
+            print(f"✓ 训练监控报告已生成: {report_path}", flush=True)
+    except Exception as e:
+        print(f"生成监控报告时出错: {e}", flush=True)
 
     # 清理GPU缓存
     if torch.cuda.is_available():
@@ -444,11 +478,12 @@ def main():
         print(f"当前缓存显存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
     
     # 数据增强策略：训练和验证使用不同的transform
+    # 科学实验图像数据增强策略调整：
+    # - 移除颜色扰动：光斑颜色与浓度直接相关，不应改变
+    # - 移除旋转：激光入射角度固定，旋转会改变光斑的物理特征
     train_transform = transforms.Compose([
         transforms.Resize((224, 224)),
-        # 科学实验图像的保守数据增强
-        transforms.RandomRotation(degrees=5),  # 小角度旋转，模拟相机角度微调
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),  # 减少颜色扰动
+        # 仅保留基础预处理，不进行可能影响物理特征的增强
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -460,8 +495,9 @@ def main():
     ])
     
     print("数据增强策略:", flush=True)
-    print("  训练集: 小角度旋转(±5°) + 轻微颜色扰动", flush=True)
-    print("  验证/测试集: 仅标准化，无增强", flush=True)
+    print("  训练集: 仅基础预处理，保持物理特征完整性", flush=True)
+    print("  验证/测试集: 仅基础预处理，无增强", flush=True)
+    print("  说明: 移除颜色扰动和旋转以保持光斑的物理特征", flush=True)
     
     # 智能数据路径检测
     if args.data_path:
@@ -469,6 +505,11 @@ def main():
     else:
         # 尝试多个可能的路径
         possible_paths = [
+            r"/root/autodl-tmp/2025年实验照片_no_timestamp",  # Linux云服务器路径（干净数据集）
+            r"D:\gm\2025年实验照片_no_timestamp",  # Windows本地路径（干净数据集）
+            r".\2025年实验照片_no_timestamp",  # 相对路径（干净数据集）
+            r"2025年实验照片_no_timestamp",  # 当前目录（干净数据集）
+            # 备用原始路径（如果干净数据集还未生成）
             r"/root/autodl-tmp/2025年实验照片",  # Linux云服务器路径
             r"D:\gm\2025年实验照片",  # Windows本地路径
             r".\2025年实验照片",  # 相对路径
@@ -631,31 +672,6 @@ def main():
         plt.title(f"{labels['all_data']}{labels['test_results']} (R² = {r2:.3f})")
         plt.savefig('vgg_final_prediction_plot_all.png')
         plt.close()
-        
-        # Grad-CAM可视化
-        print("生成全部数据模型的Grad-CAM可视化...")
-        target_layer = None
-        for name, module in model.features.named_modules():
-            if 'cbam_5' in name:
-                target_layer = module
-        assert target_layer is not None, '未找到目标CBAM层'
-        grad_cam = GradCAM(model, target_layer)
-        
-        # 使用验证transform获取图像用于可视化
-        vis_dataset = LocalImageDataset(root_dir=dataset_path, transform=val_test_transform)
-        img, _ = vis_dataset[0]
-        input_tensor = img.unsqueeze(0).to(device)
-        cam = grad_cam(input_tensor)
-        img_np = img.permute(1, 2, 0).cpu().numpy()
-        img_np = img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-        img_np = np.clip(img_np, 0, 1)
-        img_np = (img_np * 255).astype(np.uint8)
-        cam_resized = cv2.resize(cam, (224, 224))
-        heatmap = cm.jet(cam_resized)[:, :, :3]
-        heatmap = (heatmap * 255).astype(np.uint8)
-        overlay = cv2.addWeighted(img_np, 0.5, heatmap, 0.5, 0)
-        cv2.imwrite('vgg_grad_cam_all.png', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-        print('Grad-CAM可视化结果已保存为 vgg_grad_cam_all.png')
 
     if args.group in ['bg0', 'bg1', 'allgroup']:
         group_list = [args.group] if args.group in ['bg0', 'bg1'] else ['bg0', 'bg1']
@@ -797,31 +813,6 @@ def main():
             plt.title(f'{bg_type}{labels["test_results"]} (R² = {r2:.3f})')
             plt.savefig(f'vgg_final_prediction_plot_{bg_type}.png')
             plt.close()
-            
-            # Grad-CAM可视化
-            print(f"生成{bg_type}模型的Grad-CAM可视化...")
-            target_layer = None
-            for name, module in model.features.named_modules():
-                if 'cbam_5' in name:
-                    target_layer = module
-            assert target_layer is not None, '未找到目标CBAM层'
-            grad_cam = GradCAM(model, target_layer)
-            
-            # 使用验证transform获取图像用于可视化
-            vis_dataset = LocalImageDataset(root_dir=dataset_path, transform=val_test_transform, bg_type=bg_type)
-            img, _ = vis_dataset[0]
-            input_tensor = img.unsqueeze(0).to(device)
-            cam = grad_cam(input_tensor)
-            img_np = img.permute(1, 2, 0).cpu().numpy()
-            img_np = img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-            img_np = np.clip(img_np, 0, 1)
-            img_np = (img_np * 255).astype(np.uint8)
-            cam_resized = cv2.resize(cam, (224, 224))
-            heatmap = cm.jet(cam_resized)[:, :, :3]
-            heatmap = (heatmap * 255).astype(np.uint8)
-            overlay = cv2.addWeighted(img_np, 0.5, heatmap, 0.5, 0)
-            cv2.imwrite(f'vgg_grad_cam_{bg_type}.png', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-            print(f'Grad-CAM可视化结果已保存为 vgg_grad_cam_{bg_type}.png')
 
 if __name__ == '__main__':
     try:

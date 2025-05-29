@@ -41,13 +41,12 @@ def analyze_dataset_correlation(data_path):
     
     # 检测数据路径
     possible_paths = [
-        data_path,
-        "D:/2025年实验照片",
-        "D:/2025实验照片",
-        "D:/gm/data",
-        "D:/data", 
-        "/mnt/d/data",
-        "./data"
+        "D:/2025年实验照片_no_timestamp",  # 干净数据集（优先）
+        "D:/2025年实验照片",  # 原始数据集（备用）
+        "/root/autodl-tmp/2025年实验照片_no_timestamp",  # Linux干净数据集
+        "/root/autodl-tmp/2025年实验照片",  # Linux原始数据集
+        "./2025年实验照片_no_timestamp",  # 相对路径干净数据集
+        "./2025年实验照片"  # 相对路径原始数据集
     ]
     
     dataset_path = None
@@ -210,7 +209,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='分析数据集时间戳与浓度相关性')
-    parser.add_argument('--data_path', type=str, default='D:/2025年实验照片', help='数据集路径')
+    parser.add_argument('--data_path', type=str, default='D:/2025年实验照片_no_timestamp', help='数据集路径（默认使用移除时间戳的干净数据集）')
     
     args = parser.parse_args()
     

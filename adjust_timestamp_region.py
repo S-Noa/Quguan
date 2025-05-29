@@ -154,11 +154,21 @@ class TimestampRegionAdjuster:
         return (x_ratio, y_ratio, width_ratio, height_ratio)
 
 def main():
-    # 查找测试图像
-    input_dir = "D:/2025年实验照片"
+    # 数据路径 - 优先使用原始数据集（因为这是时间戳调整工具）
+    possible_input_dirs = [
+        "D:/2025年实验照片",  # 原始数据集（用于调整时间戳区域）
+        "D:/2025年实验照片_no_timestamp"  # 如果需要在干净数据集上测试
+    ]
     
-    if not os.path.exists(input_dir):
-        print(f"❌ 数据路径不存在: {input_dir}")
+    input_dir = None
+    for dir_path in possible_input_dirs:
+        if os.path.exists(dir_path):
+            input_dir = dir_path
+            print(f"使用输入目录: {input_dir}")
+            break
+    
+    if input_dir is None:
+        print("错误：未找到数据集目录！")
         return
     
     # 找到第一张图像

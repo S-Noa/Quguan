@@ -20,6 +20,8 @@ from PIL import Image
 
 # 导入字体设置工具
 from font_utils import CHINESE_SUPPORTED, get_labels, suppress_font_warnings
+# 导入训练监控模块
+from training_monitor import TrainingMonitor
 
 # 抑制字体警告
 suppress_font_warnings()
@@ -111,6 +113,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, n
     logger.info(f"学习率: {optimizer.param_groups[0]['lr']}")
     logger.info(f"损失函数: {type(criterion).__name__}")
     
+    # 初始化训练监控器
+    monitor_dir = f'monitoring_results_{group_tag}' if group_tag else 'monitoring_results_cnn'
+    training_monitor = TrainingMonitor(model_type='cnn', save_dir=monitor_dir, device=device)
+    logger.info(f"训练监控器已初始化，结果保存至: {monitor_dir}")
+    
+    # 获取一个样本图像用于监控
+    sample_image = None
+    sample_concentration = None
+    try:
+        for inputs, targets in val_loader:
+            sample_image = inputs[0]  # 取第一张图像
+            sample_concentration = targets[0].item()
+            break
+        logger.info(f"获取监控样本图像成功，浓度: {sample_concentration}")
+    except Exception as e:
+        logger.warning(f"获取监控样本图像失败: {e}")
+    
     best_val_loss = float('inf')
     training_start_time = time.time()
     
@@ -187,42 +206,69 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, n
             torch.save(model.state_dict(), best_model_path)
             logger.info(f'✓ 保存最佳模型到 {best_model_path}，验证损失: {val_loss:.6f}')
         
-        # 每5个epoch生成预测图
+        # 每5个epoch生成预测图和Grad-CAM监控
         if epoch % 5 == 0:
             try:
                 # 获取标签
                 labels = get_labels(CHINESE_SUPPORTED)
                 
+                # 生成预测对比图
                 plt.figure(figsize=(10, 6))
                 plt.scatter(val_targets, val_predictions, alpha=0.5)
                 plt.plot([min(val_targets), max(val_targets)], [min(val_targets), max(val_targets)], 'r--')
                 plt.xlabel(labels['true_concentration'])
                 plt.ylabel(labels['predicted_concentration'])
                 plt.title(f"{labels['epoch']} {epoch + 1} {labels['prediction_vs_true']} (R² = {r2:.3f})")
-                tag = f'_{group_tag}' if group_tag else ''
-                plot_file = f'cnn_prediction_plot_epoch_{epoch + 1}{tag}.png'
-                plt.savefig(plot_file)
+                prediction_plot_path = f'cnn_prediction_plot_epoch_{epoch + 1}.png'
+                if group_tag:
+                    prediction_plot_path = f'cnn_prediction_plot_{group_tag}_epoch_{epoch + 1}.png'
+                plt.savefig(prediction_plot_path)
                 plt.close()
-                logger.info(f'预测图已保存: {plot_file}')
+                logger.info(f'✓ 预测对比图已保存: {prediction_plot_path}')
+                
+                # 生成Grad-CAM监控（如果有样本图像）
+                if sample_image is not None:
+                    logger.info(f"正在生成Epoch {epoch + 1}的Grad-CAM监控...")
+                    analysis_result = training_monitor.visualize_gradcam_with_regions(
+                        model, sample_image, epoch + 1, 
+                        save_name=f'cnn_gradcam_{group_tag}_epoch_{epoch + 1}' if group_tag else f'cnn_gradcam_epoch_{epoch + 1}'
+                    )
+                    
+                    if analysis_result:
+                        # 记录监控结果到日志
+                        regions_attention = analysis_result['regions_attention']
+                        attention_ratios = analysis_result['attention_ratios']
+                        
+                        logger.info(f"=== Epoch {epoch + 1} 注意力分析 ===")
+                        logger.info(f"中心区域注意力: {regions_attention['center']:.3f}")
+                        logger.info(f"水印区域注意力(中): {regions_attention['watermark_medium']:.3f}")
+                        logger.info(f"水印/中心注意力比例: {attention_ratios['medium_ratio']:.3f}")
+                        
+                        # 检查是否有警告
+                        has_warning, warning_msg = training_monitor.check_watermark_attention(analysis_result)
+                        if has_warning:
+                            logger.warning(f"注意力警告: {warning_msg}")
+                        else:
+                            logger.info("✓ 注意力分布正常")
+                
             except Exception as e:
-                logger.error(f'生成预测图失败: {e}')
+                logger.error(f"生成监控可视化时出错: {e}")
     
     total_training_time = time.time() - training_start_time
     logger.info(f"\n=== 训练完成 ===")
-    logger.info(f"总训练时间: {total_training_time:.1f}s ({total_training_time/60:.1f}分钟)")
+    logger.info(f"总训练时间: {total_training_time:.1f}秒")
     logger.info(f"最佳验证损失: {best_val_loss:.6f}")
-    logger.info(f"平均每轮训练时间: {total_training_time/(num_epochs-start_epoch):.1f}s")
     
-    # 保存训练历史
+    # 生成最终监控报告
     try:
-        history_file = f'training_history_{group_tag if group_tag else "all"}.npz'
-        np.savez(history_file, 
-                train_losses=train_losses,
-                val_losses=val_losses, 
-                val_r2_scores=val_r2_scores)
-        logger.info(f"训练历史已保存: {history_file}")
+        report_name = f'cnn_training_monitoring_report_{group_tag}' if group_tag else 'cnn_training_monitoring_report'
+        report_path = training_monitor.generate_monitoring_report(save_name=report_name)
+        if report_path:
+            logger.info(f"✓ 训练监控报告已生成: {report_path}")
     except Exception as e:
-        logger.error(f"保存训练历史失败: {e}")
+        logger.error(f"生成监控报告时出错: {e}")
+    
+    return best_val_loss
 
 def evaluate_model(model, test_loader, device, logger=None):
     """评估模型并记录结果"""
@@ -272,43 +318,6 @@ def evaluate_model(model, test_loader, device, logger=None):
     
     return mse, r2, predictions, targets
 
-# Grad-CAM可视化工具
-class GradCAM:
-    def __init__(self, model, target_layer):
-        self.model = model
-        self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
-        self.hook_handles = []
-        self._register_hooks()
-    def _register_hooks(self):
-        def forward_hook(module, input, output):
-            self.activations = output.detach()
-        def backward_hook(module, grad_in, grad_out):
-            self.gradients = grad_out[0].detach()
-        handle1 = self.target_layer.register_forward_hook(forward_hook)
-        handle2 = self.target_layer.register_backward_hook(backward_hook)
-        self.hook_handles.extend([handle1, handle2])
-    def remove_hooks(self):
-        for handle in self.hook_handles:
-            handle.remove()
-    def __call__(self, input_tensor, target_index=None):
-        self.model.eval()
-        output, _ = self.model(input_tensor)
-        if target_index is None:
-            target_index = 0
-        loss = output[:, 0].sum() if output.ndim == 2 else output.sum()
-        self.model.zero_grad()
-        loss.backward(retain_graph=True)
-        weights = self.gradients.mean(dim=[2, 3], keepdim=True)
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)
-        cam = torch.relu(cam)
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-8)
-        cam = cam.squeeze().cpu().numpy()
-        self.remove_hooks()
-        return cam
-
 def main():
     parser = argparse.ArgumentParser(description='CNN分组训练开关')
     parser.add_argument('--group', type=str, default='all', choices=['all', 'bg0', 'bg1', 'allgroup'],
@@ -319,8 +328,8 @@ def main():
                         help='批次大小 (默认: 16)')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='学习率 (默认: 0.001)')
-    parser.add_argument('--data_path', type=str, default=r"D:\2025年实验照片",
-                        help='数据集路径')
+    parser.add_argument('--data_path', type=str, default=r"D:\2025年实验照片_no_timestamp",
+                        help='数据集路径（默认使用移除时间戳的干净数据集）')
     args = parser.parse_args()
 
     # 设置主日志记录器
@@ -403,27 +412,6 @@ def main():
                 plt.close()
                 main_logger.info('最终预测图已保存: cnn_final_prediction_plot_all.png')
                 
-                # Grad-CAM可视化
-                main_logger.info("生成Grad-CAM可视化...")
-                try:
-                    grad_cam = GradCAM(model, model.last_conv)
-                    img, _ = full_dataset[0]
-                    input_tensor = img.unsqueeze(0).to(device)
-                    cam = grad_cam(input_tensor)
-                    
-                    img_np = img.permute(1, 2, 0).cpu().numpy()
-                    img_np = img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-                    img_np = np.clip(img_np, 0, 1)
-                    img_np = (img_np * 255).astype(np.uint8)
-                    cam_resized = cv2.resize(cam, (224, 224))
-                    heatmap = cm.jet(cam_resized)[:, :, :3]
-                    heatmap = (heatmap * 255).astype(np.uint8)
-                    overlay = cv2.addWeighted(img_np, 0.5, heatmap, 0.5, 0)
-                    cv2.imwrite('cnn_grad_cam_all.png', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-                    main_logger.info('Grad-CAM可视化已保存: cnn_grad_cam_all.png')
-                except Exception as e:
-                    main_logger.error(f'Grad-CAM可视化失败: {e}')
-                    
             except Exception as e:
                 main_logger.error(f"全部数据训练失败: {e}")
                 import traceback
@@ -488,27 +476,6 @@ def main():
                     plt.close()
                     main_logger.info(f'{bg_type}最终预测图已保存: cnn_final_prediction_plot_{bg_type}.png')
                     
-                    # Grad-CAM可视化
-                    main_logger.info(f"生成{bg_type}的Grad-CAM可视化...")
-                    try:
-                        grad_cam = GradCAM(model, model.last_conv)
-                        img, _ = dataset[0]
-                        input_tensor = img.unsqueeze(0).to(device)
-                        cam = grad_cam(input_tensor)
-                        
-                        img_np = img.permute(1, 2, 0).cpu().numpy()
-                        img_np = img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-                        img_np = np.clip(img_np, 0, 1)
-                        img_np = (img_np * 255).astype(np.uint8)
-                        cam_resized = cv2.resize(cam, (224, 224))
-                        heatmap = cm.jet(cam_resized)[:, :, :3]
-                        heatmap = (heatmap * 255).astype(np.uint8)
-                        overlay = cv2.addWeighted(img_np, 0.5, heatmap, 0.5, 0)
-                        cv2.imwrite(f'cnn_grad_cam_{bg_type}.png', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-                        main_logger.info(f'{bg_type} Grad-CAM可视化已保存: cnn_grad_cam_{bg_type}.png')
-                    except Exception as e:
-                        main_logger.error(f'{bg_type} Grad-CAM可视化失败: {e}')
-                        
                 except Exception as e:
                     main_logger.error(f"{bg_type}训练失败: {e}")
                     import traceback
