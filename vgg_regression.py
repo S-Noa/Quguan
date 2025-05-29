@@ -15,6 +15,12 @@ import time
 import random
 from PIL import Image
 
+# 导入字体设置工具
+from font_utils import CHINESE_SUPPORTED, get_labels, suppress_font_warnings
+
+# 抑制字体警告
+suppress_font_warnings()
+
 # 设置随机种子确保可重复性
 def set_seed(seed=42):
     random.seed(seed)
@@ -351,12 +357,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, device, n
                 break
         
         if epoch % 5 == 0:
+            # 获取标签
+            labels = get_labels(CHINESE_SUPPORTED)
+            
             plt.figure(figsize=(10, 6))
             plt.scatter(val_targets, val_predictions, alpha=0.5)
             plt.plot([min(val_targets), max(val_targets)], [min(val_targets), max(val_targets)], 'r--')
-            plt.xlabel('真实浓度值')
-            plt.ylabel('预测浓度值')
-            plt.title(f'Epoch {epoch + 1} 预测值 vs 真实值 (R² = {r2:.3f})')
+            plt.xlabel(labels['true_concentration'])
+            plt.ylabel(labels['predicted_concentration'])
+            plt.title(f"{labels['epoch']} {epoch + 1} {labels['prediction_vs_true']} (R² = {r2:.3f})")
             plt.savefig(f'vgg_prediction_plot_epoch_{epoch + 1}.png')
             plt.close()
     
@@ -610,12 +619,16 @@ def main():
         print("\n全部数据测试集结果:")
         print(f"均方误差 (MSE): {mse:.3f}")
         print(f"R² 分数: {r2:.3f}")
+        
+        # 获取标签
+        labels = get_labels(CHINESE_SUPPORTED)
+        
         plt.figure(figsize=(10, 6))
         plt.scatter(test_targets, test_predictions, alpha=0.5)
         plt.plot([min(test_targets), max(test_targets)], [min(test_targets), max(test_targets)], 'r--')
-        plt.xlabel('真实浓度值')
-        plt.ylabel('预测浓度值')
-        plt.title(f'全部数据测试集预测结果 (R² = {r2:.3f})')
+        plt.xlabel(labels['true_concentration'])
+        plt.ylabel(labels['predicted_concentration'])
+        plt.title(f"{labels['all_data']}{labels['test_results']} (R² = {r2:.3f})")
         plt.savefig('vgg_final_prediction_plot_all.png')
         plt.close()
         
@@ -772,12 +785,16 @@ def main():
             print(f"\n{bg_type}测试集结果:")
             print(f"均方误差 (MSE): {mse:.3f}")
             print(f"R² 分数: {r2:.3f}")
+            
+            # 获取标签
+            labels = get_labels(CHINESE_SUPPORTED)
+            
             plt.figure(figsize=(10, 6))
             plt.scatter(test_targets, test_predictions, alpha=0.5)
             plt.plot([min(test_targets), max(test_targets)], [min(test_targets), max(test_targets)], 'r--')
-            plt.xlabel('真实浓度值')
-            plt.ylabel('预测浓度值')
-            plt.title(f'{bg_type}测试集预测结果 (R² = {r2:.3f})')
+            plt.xlabel(labels['true_concentration'])
+            plt.ylabel(labels['predicted_concentration'])
+            plt.title(f'{bg_type}{labels["test_results"]} (R² = {r2:.3f})')
             plt.savefig(f'vgg_final_prediction_plot_{bg_type}.png')
             plt.close()
             

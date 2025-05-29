@@ -30,7 +30,9 @@ class CNNFeatureExtractor(nn.Module):
         self.conv5 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         self.bn5 = nn.BatchNorm2d(512)
         self.pool5 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.last_conv = self.conv5  # 便于grad-cam可视化
+        
+        # 添加一个独立的last_conv层用于grad-cam可视化
+        self.last_conv = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         
         # 全连接层
         self.fc1 = nn.Linear(512 * 7 * 7, 1024)
@@ -45,6 +47,9 @@ class CNNFeatureExtractor(nn.Module):
         x = self.pool3(F.relu(self.bn3(self.conv3(x))))
         x = self.pool4(F.relu(self.bn4(self.conv4(x))))
         x = self.pool5(F.relu(self.bn5(self.conv5(x))))
+        
+        # 添加last_conv层
+        x = F.relu(self.last_conv(x))
         
         # 保存特征图
         features = x
@@ -67,4 +72,5 @@ class CNNFeatureExtractor(nn.Module):
         x = self.pool3(F.relu(self.bn3(self.conv3(x))))
         x = self.pool4(F.relu(self.bn4(self.conv4(x))))
         x = self.pool5(F.relu(self.bn5(self.conv5(x))))
+        x = F.relu(self.last_conv(x))
         return x 
