@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
+
 class ResNet50Regression(nn.Module):
     """基于ResNet50的回归模型"""
     

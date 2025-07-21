@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 from pathlib import Path
 
+
 class FastImageDataset(Dataset):
     def __init__(self, root_dir, transform=None, bg_type=None, 
                  validation_mode='cache', cache_file=None, 

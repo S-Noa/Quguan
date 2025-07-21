@@ -11,6 +11,7 @@ import warnings
 import os
 import platform
 
+
 def setup_chinese_font():
     """
     设置matplotlib的中文字体

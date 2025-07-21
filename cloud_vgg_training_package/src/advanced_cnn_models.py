@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+
 class SpatialAttention(nn.Module):
     """空间注意力机制"""
     

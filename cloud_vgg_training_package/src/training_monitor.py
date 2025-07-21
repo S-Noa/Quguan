@@ -16,6 +16,7 @@ from PIL import Image
 import time
 from font_utils import auto_setup_font, get_labels, CHINESE_SUPPORTED
 
+
 class TrainingMonitor:
     """训练过程监控器"""
     
