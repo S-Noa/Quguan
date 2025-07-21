@@ -1,0 +1,30 @@
+{
+  "package_name": "Cloud VGG Training Package",
+  "creation_time": "2025-06-06T10:56:58.697915",
+  "target_platform": "云端4090 GPU",
+  "purpose": "特征数据集VGG训练",
+  "estimated_size": "5-8 GB",
+  "files_included": [
+    "src/vgg_regression.py",
+    "src/cbam.py",
+    "src/fast_dataset.py",
+    "src/font_utils.py",
+    "src/training_monitor.py",
+    "src/dataset_config.py",
+    "feature_dataset/",
+    "configs/gpu_config.json",
+    "configs/training_config.json",
+    "configs/data_config.json",
+    "cloud_vgg_train.py",
+    "requirements.txt",
+    "start_training.sh"
+  ],
+  "optimizations": [
+    "RTX 4090专用batch_size优化",
+    "混合精度训练启用",
+    "数据加载器优化(num_workers=8)",
+    "内存固定(pin_memory=True)",
+    "早停机制防止过拟合",
+    "精简依赖减少安装时间"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "dataset_path": "./feature_dataset",
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "test_ratio": 0.15,
+  "shuffle": true,
+  "augmentation": "minimal"
+}
