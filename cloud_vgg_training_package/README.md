@@ -21,16 +21,22 @@ chmod +x start_training.sh
 
 ### 3. 开始训练
 
-#### 训练
+#### 查看参数
 ```bash
 # 查看训练脚本参数
 python train_with_feature_dataset.py -h
 ```
 
-#### 断点续训功能
+#### 训练示例
 ```bash
-# 训练脚本断点续训
-python train_with_feature_dataset.py --model_type vgg --bg_mode bg0_20mw --resume ./training_dir/best.pth
+# 训练命令示例
+python cloud_vgg_training_package/train_with_feature_dataset.py \
+    --model_type resnet50 \
+    --bg_mode bg1_400mw \
+    --epochs 10 \
+    --progressive_weighting \
+    --warmup_epochs 3 \
+    --smooth_scale_factor 0.01 \
 ```
 
 ## 📊 配置说明
