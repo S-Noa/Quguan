@@ -403,21 +403,41 @@ class ScatterPlotVisualizer:
         
         return np.array(predictions), np.array(targets)
     
-    def create_scatter_plot(self, predictions, targets, model_name, save_name=None):
+    def create_scatter_plot(self, predictions, targets, model_name, save_name=None, min_concentration=None, max_concentration=None):
         """创建散点图"""
         if save_name is None:
             save_name = f"scatter_plot_{model_name.replace(' ', '_').replace('+', '_')}"
-        
+
+        # 应用浓度范围筛选
+        mask = np.ones_like(targets, dtype=bool)
+        if min_concentration is not None:
+            mask &= (targets >= min_concentration)
+        if max_concentration is not None:
+            mask &= (targets <= max_concentration)
+
+        # 应用筛选
+        filtered_predictions = predictions[mask]
+        filtered_targets = targets[mask]
+
+        # 如果所有数据都被筛选掉，发出警告并使用原始数据
+        if len(filtered_targets) == 0:
+            print(f"⚠️ 警告: 浓度范围 [{min_concentration}, {max_concentration}] mg/L 内没有数据点，将使用所有数据")
+            filtered_predictions = predictions
+            filtered_targets = targets
+        elif len(filtered_targets) < len(targets):
+            print(f"🔍 已筛选浓度范围: [{min_concentration or min(targets):.2f}, {max_concentration or max(targets):.2f}] mg/L")
+            print(f"   原始数据点: {len(targets)}, 筛选后数据点: {len(filtered_targets)}")
+
         # 计算评估指标
-        r2 = r2_score(targets, predictions)
+        r2 = r2_score(filtered_targets, filtered_predictions)
         mae = mean_absolute_error(targets, predictions)
         mse = mean_squared_error(targets, predictions)
         rmse = np.sqrt(mse)
         
         # 计算误差
-        errors = predictions - targets
-        
-        print(f"\n📊 {model_name} 评估指标:")
+        errors = filtered_predictions - filtered_targets
+
+        print(f"\n📊 {model_name} 评估指标 (筛选后):")
         print(f"   R² Score: {r2:.4f}")
         print(f"   MAE: {mae:.2f}")
         print(f"   RMSE: {rmse:.2f}")
@@ -427,11 +447,17 @@ class ScatterPlotVisualizer:
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
         
         # 1. 主散点图
-        ax1.scatter(targets, predictions, alpha=0.6, s=20)
-        
+        ax1.scatter(filtered_targets, filtered_predictions, alpha=0.6, s=20)
+
         # 理想预测线
-        min_val = min(min(targets), min(predictions))
-        max_val = max(max(targets), max(predictions))
+        min_val = min(min(filtered_targets), min(filtered_predictions))
+        max_val = max(max(filtered_targets), max(filtered_predictions))
+
+        # 添加浓度范围标注
+        if min_concentration is not None or max_concentration is not None:
+            range_text = f"浓度范围: {min_concentration if min_concentration is not None else 'min'} - {max_concentration if max_concentration is not None else 'max'} mg/L"
+            ax1.text(0.05, 0.90, range_text, transform=ax1.transAxes, fontsize=9,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
         ax1.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='理想预测')
         
         ax1.set_xlabel('真实浓度 (mg/L)')
@@ -450,24 +476,24 @@ class ScatterPlotVisualizer:
         ax2.axvline(0, color='red', linestyle='--', linewidth=2, label='零误差')
         ax2.set_xlabel('预测误差 (mg/L)')
         ax2.set_ylabel('频次')
-        ax2.set_title('预测误差分布')
+        ax2.set_title('预测误差分布 (筛选后)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
         # 3. 残差图
-        ax3.scatter(targets, errors, alpha=0.6, s=20)
+        ax3.scatter(filtered_targets, errors, alpha=0.6, s=20)
         ax3.axhline(0, color='red', linestyle='--', linewidth=2)
         ax3.set_xlabel('真实浓度 (mg/L)')
         ax3.set_ylabel('残差 (mg/L)')
-        ax3.set_title('残差图')
+        ax3.set_title('残差图 (筛选后)')
         ax3.grid(True, alpha=0.3)
         
         # 4. 浓度分布对比
-        ax4.hist(targets, bins=30, alpha=0.7, label='真实值', density=True)
-        ax4.hist(predictions, bins=30, alpha=0.7, label='预测值', density=True)
+        ax4.hist(filtered_targets, bins=30, alpha=0.7, label='真实值', density=True)
+        ax4.hist(filtered_predictions, bins=30, alpha=0.7, label='预测值', density=True)
         ax4.set_xlabel('浓度 (mg/L)')
         ax4.set_ylabel('密度')
-        ax4.set_title('浓度分布对比')
+        ax4.set_title('浓度分布对比 (筛选后)')
         ax4.legend()
         ax4.grid(True, alpha=0.3)
         
@@ -623,7 +649,13 @@ def main():
                        help='特征数据集路径')
     parser.add_argument('--bg_mode', type=str, default='all',
                        help='背景模式 (bg0, bg1, all, bg0_20mw, etc.)')
-    
+
+    # 浓度范围筛选
+    parser.add_argument('--min_concentration', type=float, default=None,
+                       help='最小浓度值 (mg/L)')
+    parser.add_argument('--max_concentration', type=float, default=None,
+                       help='最大浓度值 (mg/L)')
+
     # 模型配置
     parser.add_argument('--baseline_cnn_model', type=str, default=None,
                        help='基线CNN模型路径')
@@ -707,7 +739,9 @@ def main():
             )
             
             r2, mae, rmse = visualizer.create_scatter_plot(
-                predictions, targets, model_name
+                predictions, targets, model_name,
+                min_concentration=args.min_concentration,
+                max_concentration=args.max_concentration
             )
             
             model_results.append((predictions, targets, model_name))
@@ -725,4 +759,4 @@ def main():
     print(f"   结果保存在: {visualizer.output_dir}")
 
 if __name__ == "__main__":
-    main() 
+    main()
