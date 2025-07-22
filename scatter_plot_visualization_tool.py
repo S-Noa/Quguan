@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 import seaborn as sns
 from torch.utils.data import DataLoader
+from typing import List, Tuple, Optional, Dict, Any, Union
 
 # 添加路径
 sys.path.append('src')
@@ -27,7 +28,7 @@ sys.path.append('cloud_vgg_training_package')
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
-def safe_collate_fn(batch):
+def safe_collate_fn(batch: List[Any]) -> Tuple[torch.Tensor, torch.Tensor, List[Dict[str, Any]]]:
     """
     安全的collate函数，处理可能缺失的字段
     """
@@ -81,7 +82,7 @@ def safe_collate_fn(batch):
 class ScatterPlotVisualizer:
     """散点图可视化器"""
     
-    def __init__(self, output_dir=None):
+    def __init__(self, output_dir: Optional[str] = None) -> None:
         """
         初始化可视化器
         
@@ -109,7 +110,7 @@ class ScatterPlotVisualizer:
             checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         return checkpoint
     
-    def load_model_and_predict(self, model_type, model_path, dataset_path, bg_mode='all'):
+    def load_model_and_predict(self, model_type: str, model_path: str, dataset_path: str, bg_mode: str = 'all') -> Tuple[np.ndarray, np.ndarray, str]:
         """
         加载模型并生成预测
         
@@ -132,7 +133,7 @@ class ScatterPlotVisualizer:
         else:
             raise ValueError(f"不支持的模型类型: {model_type}")
     
-    def _load_baseline_cnn(self, model_path, dataset_path, bg_mode):
+    def _load_baseline_cnn(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载基线CNN模型"""
         from cnn_model import CNNFeatureExtractor
         from feature_dataset_loader import create_feature_dataloader
@@ -172,7 +173,7 @@ class ScatterPlotVisualizer:
         
         return predictions, targets, "基线CNN"
     
-    def _load_enhanced_cnn(self, model_path, dataset_path, bg_mode):
+    def _load_enhanced_cnn(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载增强CNN模型"""
         from enhanced_laser_spot_cnn import EnhancedLaserSpotCNN
         from feature_dataset_loader import create_feature_dataloader
@@ -212,7 +213,7 @@ class ScatterPlotVisualizer:
         
         return predictions, targets, "增强CNN"
     
-    def _load_cloud_resnet50(self, model_path, dataset_path, bg_mode):
+    def _load_cloud_resnet50(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载云端ResNet50模型"""
         from feature_dataset_loader import create_feature_dataloader
         
@@ -280,7 +281,7 @@ class ScatterPlotVisualizer:
         
         return predictions, targets, "云端ResNet50"
     
-    def _load_cloud_vgg(self, model_path, dataset_path, bg_mode):
+    def _load_cloud_vgg(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载云端VGG模型"""
         import sys
         sys.path.append('cloud_vgg_training_package/src')
@@ -325,7 +326,7 @@ class ScatterPlotVisualizer:
         
         return predictions, targets, "云端VGG"
     
-    def _load_adaptive_resnet50(self, model_path, dataset_path, bg_mode):
+    def _load_adaptive_resnet50(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载自适应ResNet50模型"""
         from adaptive_attention_resnet50 import AdaptiveAttentionResNet50
         from feature_dataset_loader import create_feature_dataloader
@@ -403,21 +404,21 @@ class ScatterPlotVisualizer:
         
         return np.array(predictions), np.array(targets)
     
-    def create_scatter_plot(self, predictions, targets, model_name, save_name=None, min_concentration=None, max_concentration=None):
+    def create_scatter_plot(self, predictions: np.ndarray, targets: np.ndarray, model_name: str, save_name: Optional[str] = None, min_concentration: Optional[float] = None, max_concentration: Optional[float] = None) -> Tuple[float, float, float]:
         """创建散点图"""
         if save_name is None:
             save_name = f"scatter_plot_{model_name.replace(' ', '_').replace('+', '_')}"
 
         # 应用浓度范围筛选
-        mask = np.ones_like(targets, dtype=bool)
+        mask: np.ndarray[np.bool_] = np.ones_like(targets, dtype=bool)
         if min_concentration is not None:
             mask &= (targets >= min_concentration)
         if max_concentration is not None:
             mask &= (targets <= max_concentration)
 
         # 应用筛选
-        filtered_predictions = predictions[mask]
-        filtered_targets = targets[mask]
+        filtered_predictions: np.ndarray = predictions[mask]
+        filtered_targets: np.ndarray = targets[mask]
 
         # 如果所有数据都被筛选掉，发出警告并使用原始数据
         if len(filtered_targets) == 0:
@@ -435,7 +436,7 @@ class ScatterPlotVisualizer:
         rmse = np.sqrt(mse)
         
         # 计算误差
-        errors = filtered_predictions - filtered_targets
+        errors: np.ndarray = filtered_predictions - filtered_targets
 
         print(f"\n📊 {model_name} 评估指标 (筛选后):")
         print(f"   R² Score: {r2:.4f}")
@@ -529,7 +530,7 @@ class ScatterPlotVisualizer:
         
         return r2, mae, rmse
     
-    def create_comparison_plot(self, model_results):
+    def create_comparison_plot(self, model_results: List[Tuple[np.ndarray, np.ndarray, str]]) -> None:
         """创建模型对比图"""
         if len(model_results) < 2:
             print("⚠️ 需要至少2个模型才能创建对比图")
@@ -638,7 +639,7 @@ class ScatterPlotVisualizer:
         print(f"   最低MAE: {comparison_data['best_models']['lowest_mae']} (MAE={min(mae_scores):.2f})")
         print(f"   最低RMSE: {comparison_data['best_models']['lowest_rmse']} (RMSE={min(rmse_scores):.2f})")
 
-def main():
+def main() -> None:
     """主函数"""
     parser = argparse.ArgumentParser(description='散点图公式化工具')
     
