@@ -13,8 +13,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import glob
-from typing import List, Tuple, Optional
-
+from typing import List, Tuple, Optional, Dict
+import re
 
 class FeatureImageDataset(Dataset):
     """特征图像数据集加载器"""
@@ -138,7 +138,40 @@ class FeatureImageDataset(Dataset):
                 
                 # 添加到数据集
                 self.image_files.append(image_file)
-                self.concentrations.append(float(info_data['concentration']))
+                # 处理可能缺失的浓度信息
+                concentration = info_data.get('concentration')
+                bg_type = info_data.get('bg_type')
+                power = info_data.get('power')
+                
+                # 如果没有浓度信息，尝试从文件名解析
+                if concentration is None:
+                    # 从文件名解析信息
+                    # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                    filename = os.path.basename(image_file)
+                    parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
+                    if len(parts) >= 6:
+                        try:
+                            concentration = float(parts[1])  # 悬浮物浓度是第二个部分
+                            # 更新元数据
+                            info_data['concentration'] = concentration
+                            # 如果背景类型缺失，也从文件名解析
+                            if bg_type is None:
+                                bg_type = parts[4]  # 背景补光与否是第五个部分
+                                info_data['bg_type'] = bg_type
+                            # 如果功率缺失，也从文件名解析
+                            if power is None:
+                                power = parts[5]  # 激光光强是第六个部分
+                                info_data['power'] = power
+                        except ValueError:
+                            # 如果解析失败，使用默认值0.0
+                            concentration = 0.0
+                    else:
+                        # 如果文件名格式不正确，使用默认值0.0
+                        concentration = 0.0
+                else:
+                    concentration = float(concentration)
+                
+                self.concentrations.append(concentration)
                 self.metadata.append(info_data)
                 valid_count += 1
                 
@@ -226,19 +259,19 @@ class FeatureImageDataset(Dataset):
         stats = {}
         
         # 统计背景类型
-        bg_types = [meta['bg_type'] for meta in self.metadata]
+        bg_types = [meta.get('bg_type', 'unknown') for meta in self.metadata]
         stats['bg_types'] = {bg: bg_types.count(bg) for bg in set(bg_types)}
         
         # 统计功率类型
-        powers = [meta['power'] for meta in self.metadata]
+        powers = [meta.get('power', 'unknown') for meta in self.metadata]
         stats['powers'] = {power: powers.count(power) for power in set(powers)}
         
         # 统计距离
-        distances = [meta['distance'] for meta in self.metadata]
+        distances = [meta.get('distance', 'unknown') for meta in self.metadata]
         stats['distances'] = {dist: distances.count(dist) for dist in set(distances)}
         
         # 统计检测置信度
-        confidences = [meta['detection_confidence'] for meta in self.metadata]
+        confidences = [meta.get('detection_confidence', 0.0) for meta in self.metadata]
         stats['detection_confidence'] = {
             'min': min(confidences),
             'max': max(confidences),
@@ -249,32 +282,199 @@ class FeatureImageDataset(Dataset):
         return stats
 
 
-def create_feature_dataloader(feature_dataset_path: str,
+def detect_feature_datasets(base_path: str = ".", version_filter: str = None) -> List[Dict]:
+    """
+    检测特征数据集（支持版本过滤）
+    
+    Args:
+        base_path: 搜索基础路径
+        version_filter: 版本过滤器 ('v1', 'v2', 'latest', None表示全部)
+        
+    Returns:
+        数据集信息列表，按版本和时间排序
+    """
+    print(f"🔍 检测特征数据集...")
+    print(f"   搜索路径: {base_path}")
+    if version_filter:
+        print(f"   版本过滤: {version_filter}")
+    
+    datasets = []
+    
+    # 搜索特征数据集目录
+    for item in os.listdir(base_path):
+        item_path = os.path.join(base_path, item)
+        if os.path.isdir(item_path):
+            # 检查是否为特征数据集目录
+            is_feature_dataset = False
+            dataset_version = 'v1'  # 默认版本
+            
+            # 通过目录名判断
+            if item.startswith('feature_dataset'):
+                is_feature_dataset = True
+                
+                # 提取版本信息
+                if 'v2' in item.lower():
+                    dataset_version = 'v2'
+                elif 'v3' in item.lower():
+                    dataset_version = 'v3'
+                elif 'v4' in item.lower():
+                    dataset_version = 'v4'
+                else:
+                    # 旧版本命名方式
+                    dataset_version = 'v1'
+            
+            # 检查目录结构
+            if is_feature_dataset:
+                images_dir = os.path.join(item_path, 'images')
+                info_dir = os.path.join(item_path, 'original_info')
+                config_file = os.path.join(item_path, 'config.json')
+                
+                if os.path.exists(images_dir) and os.path.exists(info_dir):
+                    # 获取数据集详细信息
+                    dataset_info = {
+                        'path': item_path,
+                        'name': item,
+                        'version': dataset_version,
+                        'images_dir': images_dir,
+                        'info_dir': info_dir,
+                        'config_file': config_file if os.path.exists(config_file) else None,
+                        'creation_time': None,
+                        'sample_count': 0,
+                        'exclude_patterns': [],
+                        'yolo_model_used': None
+                    }
+                    
+                    # 读取配置文件（如果存在）
+                    if dataset_info['config_file']:
+                        try:
+                            with open(dataset_info['config_file'], 'r', encoding='utf-8') as f:
+                                config = json.load(f)
+                                dataset_info['creation_time'] = config.get('creation_time')
+                                dataset_info['exclude_patterns'] = config.get('exclude_patterns', [])
+                                dataset_info['yolo_model_used'] = config.get('yolo_model_used')
+                                # 从配置文件获取准确的版本信息
+                                if 'version' in config:
+                                    dataset_info['version'] = config['version']
+                        except Exception as e:
+                            print(f"⚠️ 读取配置文件失败: {config_file} - {e}")
+                    
+                    # 统计样本数量
+                    try:
+                        image_files = [f for f in os.listdir(images_dir) 
+                                     if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                        dataset_info['sample_count'] = len(image_files)
+                    except Exception:
+                        dataset_info['sample_count'] = 0
+                    
+                    # 提取时间戳（如果配置文件中没有）
+                    if not dataset_info['creation_time']:
+                        timestamp_match = re.search(r'(\d{8}_\d{6})', item)
+                        if timestamp_match:
+                            dataset_info['creation_time'] = timestamp_match.group(1)
+                    
+                    datasets.append(dataset_info)
+    
+    # 应用版本过滤
+    if version_filter:
+        if version_filter == 'latest':
+            # 获取最新版本
+            if datasets:
+                # 按版本排序（v4 > v3 > v2 > v1）
+                version_order = {'v4': 4, 'v3': 3, 'v2': 2, 'v1': 1}
+                datasets_by_version = {}
+                
+                for dataset in datasets:
+                    version = dataset['version']
+                    if version not in datasets_by_version:
+                        datasets_by_version[version] = []
+                    datasets_by_version[version].append(dataset)
+                
+                # 找到最高版本
+                max_version = max(datasets_by_version.keys(), 
+                                key=lambda v: version_order.get(v, 0))
+                latest_datasets = datasets_by_version[max_version]
+                
+                # 在同版本中选择最新的
+                if latest_datasets:
+                    latest_datasets.sort(key=lambda d: d.get('creation_time', ''), reverse=True)
+                    datasets = [latest_datasets[0]]
+                else:
+                    datasets = []
+        else:
+            # 过滤特定版本
+            datasets = [d for d in datasets if d['version'] == version_filter]
+    
+    # 排序：版本 > 时间
+    version_order = {'v4': 4, 'v3': 3, 'v2': 2, 'v1': 1}
+    datasets.sort(key=lambda d: (
+        version_order.get(d['version'], 0),
+        d.get('creation_time', '')
+    ), reverse=True)
+    
+    print(f"📊 找到 {len(datasets)} 个特征数据集:")
+    for i, dataset in enumerate(datasets, 1):
+        exclude_info = f", 排除: {dataset['exclude_patterns']}" if dataset['exclude_patterns'] else ""
+        model_info = f", 模型: {os.path.basename(dataset['yolo_model_used'])}" if dataset['yolo_model_used'] else ""
+        print(f"   {i}. {dataset['name']} ({dataset['version']}) - {dataset['sample_count']} 张{exclude_info}{model_info}")
+    
+    return datasets
+
+
+def create_feature_dataloader(feature_dataset_path: str = None,
                              batch_size: int = 32,
                              shuffle: bool = True,
                              bg_type: Optional[str] = None,
                              power_filter: Optional[str] = None,
-                             image_size: int = 224) -> Tuple[DataLoader, FeatureImageDataset]:
+                             image_size: int = 224,
+                             dataset_version: str = 'latest') -> Tuple[DataLoader, FeatureImageDataset]:
     """
-    创建特征数据集的DataLoader
+    创建特征数据集加载器（支持版本选择）
     
     Args:
-        feature_dataset_path: 特征数据集路径
+        feature_dataset_path: 特征数据集路径，None表示自动检测
         batch_size: 批次大小
-        shuffle: 是否随机打乱
-        bg_type: 背景类型过滤 ('bg0', 'bg1')
-        power_filter: 功率过滤 ('20mw', '100mw', '400mw')
+        shuffle: 是否打乱数据
+        bg_type: 过滤特定背景类型 ('bg0', 'bg1')
+        power_filter: 过滤特定功率 ('20mw', '100mw', '400mw')
         image_size: 图像尺寸
-    
+        dataset_version: 数据集版本 ('v1', 'v2', 'v3', 'v4', 'latest')
+        
     Returns:
-        DataLoader 和 Dataset 对象
+        (DataLoader, Dataset)
     """
     
-    # 定义图像变换
+    # 自动检测数据集
+    if feature_dataset_path is None:
+        print(f"自动检测特征数据集 (版本: {dataset_version})...")
+        
+        datasets = detect_feature_datasets(version_filter=dataset_version)
+        if not datasets:
+            available_datasets = detect_feature_datasets()
+            if available_datasets:
+                print("可用的数据集版本:")
+                for dataset in available_datasets:
+                    print(f"  - {dataset['name']} ({dataset['version']})")
+            raise FileNotFoundError(f"未找到版本 {dataset_version} 的特征数据集！")
+        
+        # 使用第一个（最新的）数据集
+        feature_dataset_path = datasets[0]['path']
+        dataset_info = datasets[0]
+        
+        print(f"✅ 选择数据集: {dataset_info['name']} ({dataset_info['version']})")
+        print(f"   样本数量: {dataset_info['sample_count']}")
+        if dataset_info['exclude_patterns']:
+            print(f"   排除模式: {dataset_info['exclude_patterns']}")
+        if dataset_info['yolo_model_used']:
+            print(f"   生成模型: {os.path.basename(dataset_info['yolo_model_used'])}")
+    
+    # 图像变换
+    if image_size != 224:
+        print(f"设置图像尺寸: {image_size}x{image_size}")
+    
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                            std=[0.229, 0.224, 0.225])
     ])
     
@@ -286,79 +486,56 @@ def create_feature_dataloader(feature_dataset_path: str,
         power_filter=power_filter
     )
     
-    # 创建DataLoader
+    # 创建数据加载器
+    # Windows系统使用num_workers=0避免多进程问题
+    num_workers = 0 if os.name == 'nt' else 4
     dataloader = DataLoader(
-        dataset=dataset,
+        dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=2,
-        pin_memory=True,
-        drop_last=False
+        num_workers=num_workers,
+        pin_memory=True
     )
+    
+    print(f"✅ 特征数据加载器创建完成")
+    print(f"   数据集路径: {feature_dataset_path}")
+    print(f"   批次大小: {batch_size}")
+    print(f"   样本总数: {len(dataset)}")
+    print(f"   批次数量: {len(dataloader)}")
     
     return dataloader, dataset
 
 
-def detect_feature_datasets(base_path: str = ".") -> List[str]:
-    """
-    检测当前目录下的特征数据集
+def main(test_dataset_path: str = None):
+    """测试特征数据集加载器
     
     Args:
-        base_path: 搜索基础路径
-    
-    Returns:
-        特征数据集路径列表
+        test_dataset_path: 可选的测试数据集路径
     """
-    feature_datasets = []
-    
-    # 1. 搜索feature_dataset_*目录（带时间戳）
-    pattern = os.path.join(base_path, "feature_dataset_*")
-    potential_dirs = glob.glob(pattern)
-    
-    for dir_path in potential_dirs:
-        if os.path.isdir(dir_path):
-            # 检查是否包含必要的子目录
-            images_dir = os.path.join(dir_path, 'images')
-            info_dir = os.path.join(dir_path, 'original_info')
-            dataset_info = os.path.join(dir_path, 'dataset_info.json')
-            
-            if all(os.path.exists(p) for p in [images_dir, info_dir, dataset_info]):
-                feature_datasets.append(dir_path)
-    
-    # 2. 搜索feature_dataset目录（不带时间戳）
-    simple_feature_dataset = os.path.join(base_path, "feature_dataset")
-    if os.path.isdir(simple_feature_dataset):
-        # 检查是否包含必要的子目录
-        images_dir = os.path.join(simple_feature_dataset, 'images')
-        info_dir = os.path.join(simple_feature_dataset, 'original_info')
-        dataset_info = os.path.join(simple_feature_dataset, 'dataset_info.json')
-        
-        if all(os.path.exists(p) for p in [images_dir, info_dir, dataset_info]):
-            feature_datasets.append(simple_feature_dataset)
-    
-    return sorted(feature_datasets)
-
-
-def main():
-    """测试特征数据集加载器"""
     print("测试特征数据集加载器")
     
-    # 检测特征数据集
-    feature_datasets = detect_feature_datasets()
-    
-    if not feature_datasets:
-        print("未找到特征数据集")
-        print("请先运行 create_feature_dataset.py 生成特征数据集")
-        return
-    
-    # 使用最新的特征数据集
-    latest_dataset = feature_datasets[-1]
-    print(f"使用数据集: {latest_dataset}")
+    if test_dataset_path:
+        # 使用指定的测试数据集
+        feature_dataset_path = test_dataset_path
+        print(f"使用测试数据集: {test_dataset_path}")
+    else:
+        # 检测特征数据集
+        feature_datasets = detect_feature_datasets()
+        
+        if not feature_datasets:
+            print("未找到特征数据集")
+            print("请先运行 create_feature_dataset.py 生成特征数据集")
+            return
+        
+        # 使用最新的特征数据集
+        latest_dataset = feature_datasets[-1]
+        feature_dataset_path = latest_dataset['path']
+        print(f"使用数据集: {latest_dataset['name']}")
     
     try:
         # 创建DataLoader
         dataloader, dataset = create_feature_dataloader(
-            feature_dataset_path=latest_dataset,
+            feature_dataset_path=feature_dataset_path,
             batch_size=16,
             bg_type=None  # 不过滤
         )
@@ -393,4 +570,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    import sys
+    if len(sys.argv) > 1:
+        main(sys.argv[1])
+    else:
+        main()
