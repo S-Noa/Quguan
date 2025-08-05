@@ -23,7 +23,8 @@ class FeatureImageDataset(Dataset):
                  feature_dataset_path: str,
                  transform=None,
                  bg_type: Optional[str] = None,
-                 power_filter: Optional[str] = None):
+                 power_filter: Optional[str] = None,
+                 concentration_range: Optional[Tuple[float, float]] = None):
         """
         初始化特征数据集
         
@@ -32,11 +33,13 @@ class FeatureImageDataset(Dataset):
             transform: 图像变换
             bg_type: 过滤特定背景类型 ('bg0', 'bg1')
             power_filter: 过滤特定功率 ('20mw', '100mw', '400mw')
+            concentration_range: 浓度过滤范围 (min, max)
         """
         self.feature_dataset_path = feature_dataset_path
         self.transform = transform
         self.bg_type = bg_type
         self.power_filter = power_filter
+        self.concentration_range = concentration_range
         
         # 特征图像和信息文件路径
         self.images_dir = os.path.join(feature_dataset_path, 'images')
@@ -130,6 +133,32 @@ class FeatureImageDataset(Dataset):
                 if self.power_filter and info_data.get('power') != self.power_filter:
                     filtered_count += 1
                     continue
+                
+                # 检查浓度范围过滤条件
+                if self.concentration_range:
+                    min_conc, max_conc = self.concentration_range
+                    concentration = info_data.get('concentration')
+                    # 如果没有浓度信息，尝试从文件名解析
+                    if concentration is None:
+                        # 从文件名解析信息
+                        # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                        filename = os.path.basename(image_file)
+                        parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
+                        if len(parts) >= 6:
+                            try:
+                                concentration = float(parts[1])  # 悬浮物浓度是第二个部分
+                            except ValueError:
+                                # 如果解析失败，使用默认值0.0
+                                concentration = 0.0
+                        else:
+                            # 如果文件名格式不正确，使用默认值0.0
+                            concentration = 0.0
+                    else:
+                        concentration = float(concentration)
+                    
+                    if concentration < min_conc or concentration > max_conc:
+                        filtered_count += 1
+                        continue
                 
                 # 验证图像文件
                 if not self._validate_image(image_file):
@@ -425,6 +454,7 @@ def create_feature_dataloader(feature_dataset_path: str = None,
                              shuffle: bool = True,
                              bg_type: Optional[str] = None,
                              power_filter: Optional[str] = None,
+                             concentration_range: Optional[Tuple[float, float]] = None,
                              image_size: int = 224,
                              dataset_version: str = 'latest') -> Tuple[DataLoader, FeatureImageDataset]:
     """
@@ -436,6 +466,7 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         shuffle: 是否打乱数据
         bg_type: 过滤特定背景类型 ('bg0', 'bg1')
         power_filter: 过滤特定功率 ('20mw', '100mw', '400mw')
+        concentration_range: 浓度过滤范围 (min, max)
         image_size: 图像尺寸
         dataset_version: 数据集版本 ('v1', 'v2', 'v3', 'v4', 'latest')
         
@@ -483,7 +514,8 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         feature_dataset_path=feature_dataset_path,
         transform=transform,
         bg_type=bg_type,
-        power_filter=power_filter
+        power_filter=power_filter,
+        concentration_range=concentration_range
     )
     
     # 创建数据加载器

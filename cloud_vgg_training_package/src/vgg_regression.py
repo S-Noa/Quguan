@@ -429,6 +429,8 @@ def main():
                         help='基础学习率 (默认: 0.001)')
     parser.add_argument('--debug', action='store_true',
                         help='启用调试模式，显示详细的模型结构信息')
+    parser.add_argument('--concentration_range', type=str, default=None,
+                        help='浓度范围过滤，格式为"min,max"，例如"0,500"')
     args = parser.parse_args()
     print(f"命令行参数解析完成: group={args.group}, data_path={args.data_path}, batch_size={args.batch_size}, epochs={args.epochs}, lr={args.lr}, debug={args.debug}", flush=True)
 
@@ -527,6 +529,18 @@ def main():
     
     print(f"数据路径存在，开始扫描图像文件...")
     
+    # 解析浓度范围参数
+    concentration_range = None
+    if args.concentration_range:
+        try:
+            min_val, max_val = map(float, args.concentration_range.split(','))
+            concentration_range = (min_val, max_val)
+            print(f"浓度范围过滤已启用: {min_val} - {max_val}")
+        except Exception as e:
+            print(f"浓度范围参数解析失败: {e}")
+            print("请使用格式 'min,max'，例如 '0,500'")
+            return
+    
     # 验证数据格式
     config = DatasetConfig()
     format_validation = config.validate_dataset_format(dataset_path)
@@ -548,7 +562,7 @@ def main():
         print("正在初始化数据集，请稍候...")
         
         # 创建完整数据集用于划分
-        full_dataset = FastImageDataset(root_dir=dataset_path, transform=None)
+        full_dataset = FastImageDataset(root_dir=dataset_path, transform=None, concentration_range=concentration_range)
         print(f"数据集初始化完成，共找到 {len(full_dataset)} 张图像")
         if len(full_dataset) == 0:
             print("错误：未找到任何有效的图像文件！")
@@ -684,7 +698,7 @@ def main():
             print(f"\n【仅{bg_type}图像训练】")
             
             # 创建数据集用于划分
-            full_bg_dataset = FastImageDataset(root_dir=dataset_path, transform=None, bg_type=bg_type)
+            full_bg_dataset = FastImageDataset(root_dir=dataset_path, transform=None, bg_type=bg_type, concentration_range=concentration_range)
             if len(full_bg_dataset) < 10:
                 print(f"{bg_type}样本过少({len(full_bg_dataset)}张)，跳过...")
                 continue
@@ -832,4 +846,4 @@ if __name__ == '__main__':
         # 清理GPU缓存
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print("程序结束，已清理GPU缓存", flush=True) 
+            print("程序结束，已清理GPU缓存", flush=True)

@@ -19,7 +19,7 @@ from pathlib import Path
 
 class FastImageDataset(Dataset):
     def __init__(self, root_dir, transform=None, bg_type=None, 
-                 validation_mode='cache', cache_file=None, 
+                 concentration_range=None, validation_mode='cache', cache_file=None, 
                  sample_validation_ratio=0.1, max_workers=4):
         """
         快速图像数据集加载器
@@ -41,6 +41,7 @@ class FastImageDataset(Dataset):
         self.root_dir = root_dir
         self.transform = transform
         self.bg_type = bg_type
+        self.concentration_range = concentration_range
         self.validation_mode = validation_mode
         self.sample_validation_ratio = sample_validation_ratio
         self.max_workers = max_workers
@@ -55,6 +56,8 @@ class FastImageDataset(Dataset):
         print(f"🚀 初始化快速数据集 (模式: {validation_mode})")
         print(f"📁 数据路径: {root_dir}")
         print(f"🏷️ 数据类型: {bg_type or 'all'}")
+        if concentration_range:
+            print(f"📊 浓度范围: {concentration_range[0]} - {concentration_range[1]}")
         
         start_time = time.time()
         
@@ -98,6 +101,13 @@ class FastImageDataset(Dataset):
                     match = re.search(concentration_pattern, file)
                     if match:
                         concentration = float(match.group(1))
+                        
+                        # 应用浓度范围过滤
+                        if self.concentration_range is not None:
+                            min_conc, max_conc = self.concentration_range
+                            if not (min_conc <= concentration <= max_conc):
+                                continue
+                        
                         candidate_files.append(file_path)
                         candidate_concentrations.append(concentration)
         
@@ -380,4 +390,4 @@ def get_recommended_dataset(root_dir, transform=None, bg_type=None):
     else:
         print("💡 推荐: 采样验证模式 (大数据集)")
         return FastImageDataset(root_dir, transform, bg_type, validation_mode='sample', 
-                               sample_validation_ratio=0.05) 
+                               sample_validation_ratio=0.05)

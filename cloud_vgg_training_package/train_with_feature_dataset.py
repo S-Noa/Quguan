@@ -315,6 +315,12 @@ class FeatureDatasetTrainer:
         self.logger.info(f"   训练模式: {args.bg_mode.upper()}")
         self.logger.info(f"   输出目录: {self.output_dir}")
         
+        # 添加浓度范围过滤信息到日志
+        if args.concentration_range:
+            self.logger.info(f"   浓度范围过滤: {args.concentration_range}")
+        else:
+            self.logger.info("   浓度范围过滤: 未启用")
+        
         # 添加数据集信息到日志
         try:
             from dataset_name_utils import get_dataset_info_string
@@ -495,6 +501,7 @@ class FeatureDatasetTrainer:
             shuffle=False,  # 先不打乱，方便分割
             bg_type=bg_filter,
             power_filter=power_filter,
+            concentration_range=self.args.concentration_range,
             image_size=self.args.image_size
         )
         
@@ -502,21 +509,47 @@ class FeatureDatasetTrainer:
         
         # 分割训练集和验证集
         self.logger.info("=== 第2阶段：数据集分割 ===")
-        total_size = len(full_dataset)
-        train_size = int(total_size * self.args.train_ratio)
-        val_size = total_size - train_size
+        
+        # 导入数据集划分工具
+        import sys
+        sys.path.append('../src')  # 添加src目录到路径以导入dataset_split_utils
+        from dataset_split_utils import split_dataset
+        
+        # 根据指定方法划分数据集
+        if self.args.split_method == 'random':
+            self.logger.info(f"使用随机划分方式 (训练比例: {self.args.train_ratio})")
+            train_dataset, val_dataset = split_dataset(
+                full_dataset, 
+                split_method='random', 
+                train_ratio=self.args.train_ratio,
+                seed=42
+            )
+        elif self.args.split_method == 'stratified':
+            self.logger.info(f"使用按浓度分层抽样划分方式 (训练比例: {self.args.train_ratio})")
+            train_dataset, val_dataset = split_dataset(
+                full_dataset, 
+                split_method='stratified', 
+                train_ratio=self.args.train_ratio,
+                seed=42
+            )
+        elif self.args.split_method == 'interval':
+            self.logger.info(f"使用按浓度间隔分配划分方式 (训练间隔长度: {self.args.train_interval_length}, 验证间隔长度: {self.args.val_interval_length})")
+            train_dataset, val_dataset = split_dataset(
+                full_dataset, 
+                split_method='interval', 
+                train_interval_length=self.args.train_interval_length,
+                val_interval_length=self.args.val_interval_length,
+                seed=42
+            )
+        
+        train_size = len(train_dataset)
+        val_size = len(val_dataset)
+        total_size = train_size + val_size
         
         self.logger.info(f"数据集分割配置:")
         self.logger.info(f"   总样本数: {total_size}")
-        self.logger.info(f"   训练比例: {self.args.train_ratio}")
         self.logger.info(f"   训练集大小: {train_size}")
         self.logger.info(f"   验证集大小: {val_size}")
-        
-        train_dataset, val_dataset = random_split(
-            full_dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
         
         # 创建DataLoader
         self.logger.info("创建数据加载器...")
@@ -1709,11 +1742,20 @@ def main():
                        help='训练模式: bg0/bg1/all(传统3档) 或 bg0_20mw等(新6档细分)')
     parser.add_argument('--power_filter', type=str, default=None,
                        help='过滤特定功率 (例如: 20mw, 100mw, 400mw) - 与bg_mode细分冲突时忽略')
+    parser.add_argument('--concentration_range', type=str, default=None,
+                       help='浓度范围过滤 (格式: "min,max" 例如: "0,1000", 默认: None)')
     parser.add_argument('--train_ratio', type=float, default=0.8,
                        help='训练集比例 (默认: 0.8)')
+    parser.add_argument('--split_method', type=str, default='random',
+                       choices=['random', 'stratified', 'interval'],
+                       help='数据集划分方式: random(随机), stratified(按浓度分层), interval(按浓度间隔)')
+    parser.add_argument('--train_interval_length', type=int, default=4,
+                       help='训练集浓度间隔长度 (仅在split_method=interval时有效)')
+    parser.add_argument('--val_interval_length', type=int, default=1,
+                       help='验证集浓度间隔长度 (仅在split_method=interval时有效)')
     parser.add_argument('--image_size', type=int, default=224,
                        help='输入图像尺寸 (默认224)')
-    
+
     # 模型参数
     parser.add_argument('--model_type', type=str, default='cnn', choices=['cnn', 'vgg', 'resnet50'],
                        help='模型类型: cnn(高级CNN), vgg(VGG+CBAM), resnet50(ResNet50回归) (默认: cnn)')
@@ -1784,6 +1826,12 @@ def main():
     print("=" * 50)
     print(f"训练模式: {args.bg_mode.upper()}")
     
+    # 输出浓度范围过滤信息
+    if args.concentration_range:
+        print(f"浓度范围过滤: {args.concentration_range}")
+    else:
+        print("浓度范围过滤: 未启用")
+    
     try:
         # 创建训练器
         trainer = FeatureDatasetTrainer(args)
@@ -1816,4 +1864,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
