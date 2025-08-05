@@ -10,7 +10,9 @@ import sys
 import argparse
 import torch
 import torch.nn as nn
+import torch
 import numpy as np
+import cv2
 import matplotlib.pyplot as plt
 import cv2
 from PIL import Image
@@ -591,15 +593,167 @@ class GradCAMConcentrationVisualizer:
         
         return bg_filter, power_filter
     
-    def _load_checkpoint_safely(self, model_path):
-        """安全加载checkpoint"""
+    def detect_model_type(self, model_path):
+        """检测模型类型"""
+        import torch.serialization
+        import argparse
+        # 添加安全全局变量以支持argparse.Namespace
+        torch.serialization.add_safe_globals([argparse.Namespace])
+        
         try:
-            # 首先尝试使用weights_only=True（安全模式）
-            checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+            # 使用weights_only=False加载以支持包含argparse.Namespace的检查点
+            checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
         except Exception as e:
-            # 如果安全模式失败，使用weights_only=False（兼容旧格式）
-            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        return checkpoint
+            print(f"⚠️ 检测模型类型时加载检查点失败: {e}")
+            return 'traditional_cnn'
+        
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        
+        # 检测增强激光光斑CNN
+        if any('laser_attention' in k or 'multiscale' in k for k in state_dict.keys()):
+            return 'enhanced_laser_spot_cnn'
+        # 检测ResNet50
+        elif any('backbone.layer4' in k for k in state_dict.keys()):
+            return 'resnet50'
+        # 检测VGG
+        elif any('features' in k and 'conv' in k for k in state_dict.keys()):
+            return 'vgg'
+        # 默认传统CNN
+        else:
+            return 'traditional_cnn'
+    
+    def _initialize_model(self, model_type):
+        """根据模型类型初始化模型"""
+        if model_type == 'resnet50':
+            from torchvision import models
+            import torch.nn as nn
+            backbone = models.resnet50(weights=None)
+            backbone.fc = nn.Identity()
+            model = nn.Sequential(
+                backbone,
+                nn.Sequential(
+                    nn.Dropout(0.5),
+                    nn.Linear(2048, 512),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.3),
+                    nn.Linear(512, 128),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.15),
+                    nn.Linear(128, 1)
+                )
+            ).to(self.device)
+        elif model_type == 'enhanced_laser_spot_cnn':
+            from enhanced_laser_spot_cnn import EnhancedLaserSpotCNN
+            model = EnhancedLaserSpotCNN(
+                num_features=512,
+                use_attention=True,
+                use_multiscale=True
+            ).to(self.device)
+        elif model_type == 'vgg':
+            from vgg_regression import VGGRegressionCBAM
+            model = VGGRegressionCBAM(freeze_features=True).to(self.device)
+        else:
+            from resnet_regression import ResNetFeatureExtractor
+            model = ResNetFeatureExtractor().to(self.device)
+        return model
+    
+    def _load_checkpoint_safely(self, model_path):
+        """安全加载checkpoint并处理各种格式问题"""
+        # 先加载checkpoint以提取state_dict用于模型检测
+        try:
+            checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+            print(f"🔍 检测用checkpoint加载成功，类型: {type(checkpoint)}")
+        except Exception as e:
+            print(f"⚠️ 加载检测用checkpoint失败: {e}")
+            checkpoint = {}
+        
+        # 提取用于模型检测的state_dict
+        checkpoint_for_detection = self._extract_state_dict(checkpoint, "检测用")
+        model_type = self.detect_model_type(checkpoint_for_detection)
+        model = self._initialize_model(model_type)
+        
+        # 重新加载完整checkpoint
+        try:
+            # 检查是否已经是字典对象
+            if isinstance(model_path, dict):
+                checkpoint = model_path
+            else:
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+            print(f"🔍 完整checkpoint加载成功(weights_only=True)")
+        except Exception as e:
+            print(f"⚠️ weights_only=True加载失败，尝试weights_only=False: {e}")
+            # 检查是否已经是字典对象
+            if isinstance(model_path, dict):
+                checkpoint = model_path
+            else:
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        
+        # 提取实际用于加载的state_dict
+        state_dict = self._extract_state_dict(checkpoint, "加载用")
+        
+        # 验证state_dict有效性
+        if not isinstance(state_dict, dict):
+            raise TypeError(f"state_dict必须是字典类型，实际得到: {type(state_dict)}")
+        if not state_dict:
+            raise ValueError("提取的state_dict为空，无法加载模型权重")
+        
+        # 对所有模型类型使用统一的权重过滤策略
+        model_dict = model.state_dict()
+        filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+        
+        # 更新模型权重
+        model_dict.update(filtered_dict)
+        model.load_state_dict(model_dict)
+        
+        # 计算匹配率并提供详细信息
+        match_rate = len(filtered_dict) / len(state_dict) * 100 if state_dict else 0.0
+        print(f"✅ 模型权重加载成功，匹配率: {match_rate:.1f}%")
+        
+        # 添加详细的权重匹配诊断
+        if match_rate < 10.0:
+            print("⚠️ 严重警告: 权重匹配率极低，可能导致模型性能问题")
+            print(f"   模型期望参数: {len(model_dict)}个, 检查点提供: {len(state_dict)}个, 匹配: {len(filtered_dict)}个")
+            print("   可能原因: 模型结构不匹配或检查点损坏")
+            # 显示前5个不匹配的参数名
+            model_keys = set(model_dict.keys())
+            checkpoint_keys = set(state_dict.keys())
+            missing_in_checkpoint = [k for k in model_keys if k not in checkpoint_keys][:5]
+            unexpected_in_checkpoint = [k for k in checkpoint_keys if k not in model_keys][:5]
+            if missing_in_checkpoint:
+                print(f"   模型需要但检查点缺少的参数: {missing_in_checkpoint}")
+            if unexpected_in_checkpoint:
+                print(f"   检查点包含但模型不需要的参数: {unexpected_in_checkpoint}")
+        
+        return model
+    
+    def _extract_state_dict(self, checkpoint, purpose):
+        """从各种可能的checkpoint格式中提取state_dict"""
+        if isinstance(checkpoint, dict):
+            # 标准检查点格式，优先提取model_state_dict
+            for key in ['model_state_dict', 'state_dict', 'model', 'net', 'network']:
+                if key in checkpoint:
+                    candidate = checkpoint[key]
+                    if isinstance(candidate, dict) or hasattr(candidate, 'state_dict'):
+                        print(f"🔍 从'{key}'提取{purpose}state_dict")
+                        if isinstance(candidate, dict):
+                            return candidate
+                        else:
+                            return candidate.state_dict()
+            # 如果找不到明确的state_dict键，检查整个checkpoint是否是state_dict
+            if all(isinstance(v, torch.Tensor) for v in checkpoint.values()):
+                print(f"🔍 将整个checkpoint作为{purpose}state_dict")
+                return checkpoint
+            else:
+                print(f"⚠️ 无法从dict类型checkpoint中提取{purpose}state_dict")
+                return checkpoint
+        elif hasattr(checkpoint, 'state_dict'):
+            # 直接加载了模型对象，从中提取state_dict
+            print(f"🔍 从模型对象中提取{purpose}state_dict")
+            return checkpoint.state_dict()
+        else:
+            # 未知格式，返回原始对象并让上层处理错误
+            print(f"⚠️ 无法识别的checkpoint类型: {type(checkpoint)}，无法提取{purpose}state_dict")
+            return checkpoint
     
     def load_model(self, model_type, model_path):
         """加载模型"""
@@ -617,49 +771,39 @@ class GradCAMConcentrationVisualizer:
             target_layer = 'backbone.layer4'
         elif model_type in ['cloud_resnet50', 'adaptive_resnet50']:
             # 首先尝试加载权重来检测模型类型
-            try:
-                # 先加载checkpoint检查权重键
-                checkpoint = self._load_checkpoint_safely(model_path)
-                
-                # 检查是否包含注意力模块权重
-                has_attention = any('attention_modules' in key for key in checkpoint.get('model_state_dict', checkpoint).keys())
-                
-                if has_attention or model_type == 'adaptive_resnet50':
-                    # 使用自适应ResNet50
-                    try:
-                        from compatible_adaptive_resnet50 import CompatibleAdaptiveResNet50
-                        model = CompatibleAdaptiveResNet50().to(self.device)
-                        target_layer = 'backbone.layer4'
-                        print(f"   使用自适应ResNet50模型")
-                    except ImportError:
-                        print(f"   警告: 无法导入CompatibleAdaptiveResNet50，回退到标准ResNet50")
-                        # 回退到标准ResNet50
-                        import torchvision.models as models
-                        model = models.resnet50(pretrained=False)
-                        model.fc = torch.nn.Linear(model.fc.in_features, 1)
-                        model = model.to(self.device)
-                        target_layer = 'layer4'
-                else:
-                    # 使用标准ResNet50
+            # 加载state_dict
+            state_dict = self._load_checkpoint_safely(model_path)
+            
+            # 检查是否包含注意力模块权重
+            has_attention = any('attention_modules' in key for key in state_dict.keys()) if isinstance(state_dict, dict) else False
+            print(f"🔍 检查到注意力模块权重: {has_attention}")
+            print(f"   权重键示例: {list(state_dict.keys())[:5]}")
+            
+            if has_attention or model_type == 'adaptive_resnet50':
+                # 使用自适应ResNet50
+                try:
+                    from compatible_adaptive_resnet50 import CompatibleAdaptiveResNet50
+                    model = CompatibleAdaptiveResNet50().to(self.device)
+                    target_layer = 'backbone.layer4'
+                    print(f"   使用自适应ResNet50模型")
+                except ImportError:
+                    print(f"   警告: 无法导入CompatibleAdaptiveResNet50，回退到标准ResNet50")
+                    # 回退到标准ResNet50
                     import torchvision.models as models
-                    model = models.resnet50(pretrained=False)
+                    model = models.resnet50(weights=None)
                     model.fc = torch.nn.Linear(model.fc.in_features, 1)
                     model = model.to(self.device)
                     target_layer = 'layer4'
-                    print(f"   使用标准ResNet50模型")
-                
-                # 直接使用已加载的checkpoint
-                checkpoint_to_use = checkpoint
-                
-            except Exception as e:
-                print(f"   模型检测失败: {e}")
-                # 默认使用标准ResNet50
+            else:
+                # 使用标准ResNet50
                 import torchvision.models as models
-                model = models.resnet50(pretrained=False)
+                model = models.resnet50(weights=None)
                 model.fc = torch.nn.Linear(model.fc.in_features, 1)
                 model = model.to(self.device)
                 target_layer = 'layer4'
-                checkpoint_to_use = None  # 稍后重新加载
+                print(f"   使用标准ResNet50模型")
+            
+            checkpoint_to_use = state_dict
  
         elif model_type == 'cloud_vgg':
             from vgg_regression import VGGRegressionCBAM
@@ -672,6 +816,39 @@ class GradCAMConcentrationVisualizer:
         if checkpoint_to_use is None:
             # 如果没有预加载checkpoint，现在加载
             checkpoint_to_use = self._load_checkpoint_safely(model_path)
+        
+        # 处理模型实例的情况
+        print(f"   转换前checkpoint_to_use类型: {type(checkpoint_to_use)}，值: {str(checkpoint_to_use)[:100]}")
+        if not isinstance(checkpoint_to_use, dict):
+            # 显式处理Sequential类型
+            if isinstance(checkpoint_to_use, nn.Sequential):
+                print(f"   检测到Sequential实例，提取state_dict")
+                checkpoint_to_use = checkpoint_to_use.state_dict()
+            # 直接处理Module实例
+            elif isinstance(checkpoint_to_use, nn.Module):
+                print(f"   从Module实例提取state_dict")
+                checkpoint_to_use = checkpoint_to_use.state_dict()
+            # 处理列表/元组容器
+            elif isinstance(checkpoint_to_use, (list, tuple)):
+                print(f"   在列表/元组中查找Module")
+                found = False
+                for item in checkpoint_to_use:
+                    if isinstance(item, torch.nn.Module):
+                        checkpoint_to_use = item.state_dict()
+                        found = True
+                        break
+                if not found:
+                    raise TypeError(f"checkpoint_to_use列表/元组中未找到Module实例")
+            # 检查是否有state_dict方法
+            elif hasattr(checkpoint_to_use, 'state_dict'):
+                print(f"   从对象提取state_dict")
+                checkpoint_to_use = checkpoint_to_use.state_dict()
+            else:
+                raise TypeError(f"checkpoint_to_use必须是字典、Module或包含state_dict()的对象，得到: {type(checkpoint_to_use)}")
+            print(f"   转换后checkpoint_to_use类型: {type(checkpoint_to_use)}")
+        print(f"   最终checkpoint_to_use类型: {type(checkpoint_to_use)}")
+        if not isinstance(checkpoint_to_use, dict):
+            raise TypeError(f"最终checkpoint_to_use必须是字典类型，实际得到: {type(checkpoint_to_use)}")
         
         try:
             if isinstance(checkpoint_to_use, dict) and 'model_state_dict' in checkpoint_to_use:
@@ -801,4 +978,4 @@ def main():
     print(f"   统计信息: {stats_path}")
 
 if __name__ == "__main__":
-    main() 
+    main()
