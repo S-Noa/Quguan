@@ -20,9 +20,17 @@ import seaborn as sns
 from torch.utils.data import DataLoader
 from typing import List, Tuple, Optional, Dict, Any, Union
 
-# 添加路径
-sys.path.append('src')
-sys.path.append('cloud_vgg_training_package')
+# 添加路径 - 使用绝对路径确保在本地和云端都能正常工作
+# 获取当前脚本所在目录
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# 添加src目录
+src_path = os.path.join(script_dir, 'src')
+if src_path not in sys.path:
+    sys.path.append(src_path)
+# 添加cloud_vgg_training_package目录
+cloud_pkg_path = os.path.join(script_dir, 'cloud_vgg_training_package')
+if cloud_pkg_path not in sys.path:
+    sys.path.append(cloud_pkg_path)
 
 # 设置matplotlib中文支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
@@ -215,12 +223,17 @@ class ScatterPlotVisualizer:
     
     def _load_cloud_resnet50(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载云端ResNet50模型"""
+        # 添加路径 - 使用绝对路径确保在本地和云端都能正常工作
+        # 获取当前脚本所在目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # 添加cloud_vgg_training_package/src目录
+        cloud_src_path = os.path.join(script_dir, 'cloud_vgg_training_package', 'src')
+        if cloud_src_path not in sys.path:
+            sys.path.append(cloud_src_path)
         from feature_dataset_loader import create_feature_dataloader
         
         # 尝试导入云端ResNet50回归模型
         try:
-            import sys
-            sys.path.append('cloud_vgg_training_package/src')
             from resnet_regression import ResNet50Regression
             
             # 创建模型（与训练时相同的架构）
@@ -238,6 +251,7 @@ class ScatterPlotVisualizer:
         
         # 智能加载权重
         if 'model_state_dict' in checkpoint:
+        
             state_dict = checkpoint['model_state_dict']
         else:
             state_dict = checkpoint
@@ -283,8 +297,13 @@ class ScatterPlotVisualizer:
     
     def _load_cloud_vgg(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载云端VGG模型"""
-        import sys
-        sys.path.append('cloud_vgg_training_package/src')
+        # 添加路径 - 使用绝对路径确保在本地和云端都能正常工作
+        # 获取当前脚本所在目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # 添加cloud_vgg_training_package/src目录
+        cloud_src_path = os.path.join(script_dir, 'cloud_vgg_training_package', 'src')
+        if cloud_src_path not in sys.path:
+            sys.path.append(cloud_src_path)
         from feature_dataset_loader import create_feature_dataloader
         from vgg_regression import VGGRegressionCBAM
         
@@ -328,6 +347,13 @@ class ScatterPlotVisualizer:
     
     def _load_adaptive_resnet50(self, model_path: str, dataset_path: str, bg_mode: str) -> Tuple[np.ndarray, np.ndarray, str]:
         """加载自适应ResNet50模型"""
+        # 添加路径 - 使用绝对路径确保在本地和云端都能正常工作
+        # 获取当前脚本所在目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # 添加cloud_vgg_training_package/src目录
+        cloud_src_path = os.path.join(script_dir, 'cloud_vgg_training_package', 'src')
+        if cloud_src_path not in sys.path:
+            sys.path.append(cloud_src_path)
         from adaptive_attention_resnet50 import AdaptiveAttentionResNet50
         from feature_dataset_loader import create_feature_dataloader
         
@@ -686,7 +712,13 @@ def main() -> None:
     
     # 自动检测数据集
     if args.dataset_path is None:
-        sys.path.append('src')
+        # 添加路径 - 使用绝对路径确保在本地和云端都能正常工作
+        # 获取当前脚本所在目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # 添加src目录
+        src_path = os.path.join(script_dir, 'src')
+        if src_path not in sys.path:
+            sys.path.append(src_path)
         from feature_dataset_loader import detect_feature_datasets
         datasets = detect_feature_datasets()
         if datasets:
