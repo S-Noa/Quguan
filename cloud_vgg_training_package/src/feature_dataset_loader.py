@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import glob
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Callable
 import re
 
 class FeatureImageDataset(Dataset):
@@ -77,8 +77,10 @@ class FeatureImageDataset(Dataset):
         
         # 获取所有特征图像文件
         print("步骤1/4: 扫描特征图像文件...")
-        image_pattern = os.path.join(self.images_dir, "feature_*.jpg")
-        image_files = glob.glob(image_pattern)
+        # 兼容本地和云端两种命名模式
+        image_pattern1 = os.path.join(self.images_dir, "*_cropped.jpg")
+        image_pattern2 = os.path.join(self.images_dir, "feature_*.jpg")
+        image_files = glob.glob(image_pattern1) + glob.glob(image_pattern2)
         
         print(f"找到 {len(image_files)} 个特征图像文件")
         
@@ -112,7 +114,16 @@ class FeatureImageDataset(Dataset):
             try:
                 # 构建对应的信息文件路径
                 image_name = os.path.basename(image_file)
-                info_name = os.path.splitext(image_name)[0] + '.json'
+                # 根据不同命名模式构建信息文件名
+                if image_name.endswith('_cropped.jpg'):
+                    # 云端命名模式: xxx_cropped.jpg -> xxx_metadata.json
+                    info_name = image_name[:-len('_cropped.jpg')] + '_metadata.json'
+                elif image_name.startswith('feature_') and image_name.endswith('.jpg'):
+                    # 本地命名模式: feature_xxx.jpg -> feature_xxx.json
+                    info_name = image_name[:-len('.jpg')] + '.json'
+                else:
+                    # 其他模式: xxx.jpg -> xxx.json
+                    info_name = os.path.splitext(image_name)[0] + '.json'
                 info_file = os.path.join(self.info_dir, info_name)
                 
                 if not os.path.exists(info_file):
@@ -126,11 +137,41 @@ class FeatureImageDataset(Dataset):
                     info_data = json.load(f)
                 
                 # 检查过滤条件
-                if self.bg_type and info_data.get('bg_type') != self.bg_type:
+                # 首先尝试从info_data获取背景类型和功率信息
+                bg_type = info_data.get('bg_type')
+                power = info_data.get('power')
+                
+                # 如果info_data中没有这些信息，则从文件名解析
+                if bg_type is None or power is None:
+                    # 从文件名解析信息
+                    # 文件名格式: 
+                    # 云端模式: 入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强-序号_cropped.jpg
+                    # 本地模式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                    filename = os.path.basename(image_file)
+                    # 处理文件名中的特殊字符，包括'_cropped'后缀
+                    name_without_ext = os.path.splitext(filename)[0]
+                    # 移除'_cropped'后缀（仅对云端模式）
+                    if name_without_ext.endswith('_cropped'):
+                        name_without_ext = name_without_ext[:-len('_cropped')]
+                    # 移除'feature_'前缀（仅对本地模式）
+                    if name_without_ext.startswith('feature_'):
+                        name_without_ext = name_without_ext[len('feature_'):]
+                    parts = name_without_ext.split('-')
+                    if len(parts) >= 6:
+                        try:
+                            if bg_type is None:
+                                bg_type = parts[4]  # 背景补光与否是第五个部分
+                            if power is None:
+                                power = parts[5]  # 激光光强是第六个部分
+                        except (IndexError) as e:
+                            # 如果解析失败，保持为None
+                            pass
+                
+                if self.bg_type and bg_type != self.bg_type:
                     filtered_count += 1
                     continue
                 
-                if self.power_filter and info_data.get('power') != self.power_filter:
+                if self.power_filter and power != self.power_filter:
                     filtered_count += 1
                     continue
                 
@@ -141,21 +182,36 @@ class FeatureImageDataset(Dataset):
                     # 如果没有浓度信息，尝试从文件名解析
                     if concentration is None:
                         # 从文件名解析信息
-                        # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                        # 文件名格式: 
+                        # 云端模式: 入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强-序号_cropped.jpg
+                        # 本地模式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
                         filename = os.path.basename(image_file)
-                        parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
+                        # 处理文件名中的特殊字符，包括'_cropped'或'_metadata'后缀
+                        name_without_ext = os.path.splitext(filename)[0]
+                        # 移除'_cropped'后缀（仅对云端模式）
+                        if name_without_ext.endswith('_cropped'):
+                            name_without_ext = name_without_ext[:-len('_cropped')]
+                        # 移除'_metadata'后缀（仅对云端模式）
+                        elif name_without_ext.endswith('_metadata'):
+                            name_without_ext = name_without_ext[:-len('_metadata')]
+                        # 移除'feature_'前缀（仅对本地模式）
+                        if name_without_ext.startswith('feature_'):
+                            name_without_ext = name_without_ext[len('feature_'):]
+                        parts = name_without_ext.split('-')
                         if len(parts) >= 6:
                             try:
                                 concentration = float(parts[1])  # 悬浮物浓度是第二个部分
-                            except ValueError:
+                            except (ValueError, IndexError) as e:
                                 # 如果解析失败，使用默认值0.0
+                                print(f"  警告: 浓度范围过滤时文件名解析失败 {filename}: {e}")
                                 concentration = 0.0
                         else:
                             # 如果文件名格式不正确，使用默认值0.0
+                            print(f"  警告: 浓度范围过滤时文件名格式不正确 {filename}: 部分数 {len(parts)} < 6")
                             concentration = 0.0
                     else:
                         concentration = float(concentration)
-                    
+                
                     if concentration < min_conc or concentration > max_conc:
                         filtered_count += 1
                         continue
@@ -175,9 +231,22 @@ class FeatureImageDataset(Dataset):
                 # 如果没有浓度信息，尝试从文件名解析
                 if concentration is None:
                     # 从文件名解析信息
-                    # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                    # 文件名格式: 
+                    # 云端模式: 入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强-序号_cropped.jpg
+                    # 本地模式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
                     filename = os.path.basename(image_file)
-                    parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
+                    # 处理文件名中的特殊字符，包括'_cropped'或'_metadata'后缀
+                    name_without_ext = os.path.splitext(filename)[0]
+                    # 移除'_cropped'后缀（仅对云端模式）
+                    if name_without_ext.endswith('_cropped'):
+                        name_without_ext = name_without_ext[:-len('_cropped')]
+                    # 移除'_metadata'后缀（仅对云端模式）
+                    elif name_without_ext.endswith('_metadata'):
+                        name_without_ext = name_without_ext[:-len('_metadata')]
+                    # 移除'feature_'前缀（仅对本地模式）
+                    if name_without_ext.startswith('feature_'):
+                        name_without_ext = name_without_ext[len('feature_'):]
+                    parts = name_without_ext.split('-')
                     if len(parts) >= 6:
                         try:
                             concentration = float(parts[1])  # 悬浮物浓度是第二个部分
@@ -191,11 +260,13 @@ class FeatureImageDataset(Dataset):
                             if power is None:
                                 power = parts[5]  # 激光光强是第六个部分
                                 info_data['power'] = power
-                        except ValueError:
+                        except (ValueError, IndexError) as e:
                             # 如果解析失败，使用默认值0.0
+                            print(f"  警告: 文件名浓度解析失败 {filename}: {e}")
                             concentration = 0.0
                     else:
                         # 如果文件名格式不正确，使用默认值0.0
+                        print(f"  警告: 文件名格式不正确 {filename}: 部分数 {len(parts)} < 6")
                         concentration = 0.0
                 else:
                     concentration = float(concentration)
@@ -244,7 +315,22 @@ class FeatureImageDataset(Dataset):
         """获取数据项"""
         image_path = self.image_files[idx]
         concentration = self.concentrations[idx]
-        metadata = self.metadata[idx]
+        metadata = self.metadata[idx].copy()  # 创建副本以避免修改原始数据
+        
+        # 处理元数据字段，确保兼容性
+        # 如果存在'bbox'字段，将其重命名为'detection_bbox'
+        if 'bbox' in metadata and 'detection_bbox' not in metadata:
+            metadata['detection_bbox'] = metadata['bbox']
+        
+        # 如果不存在'detection_confidence'字段，设置默认值
+        if 'detection_confidence' not in metadata:
+            metadata['detection_confidence'] = 1.0
+        
+        # 添加调试信息
+        if idx < 5:  # 只显示前5个样本的详细信息
+            print(f"调试信息 - 样本 {idx}: {os.path.basename(image_path)}")
+            print(f"  浓度值: {concentration}")
+            print(f"  元数据: {metadata}")
         
         try:
             # 加载图像
@@ -254,10 +340,17 @@ class FeatureImageDataset(Dataset):
             if self.transform:
                 image = self.transform(image)
             
+            # 验证返回的数据格式
+            if idx < 5:  # 只显示前5个样本的详细信息
+                print(f"  返回数据类型: image={type(image)}, concentration={type(concentration)}, metadata={type(metadata)}")
+            
             return image, concentration, metadata
             
         except Exception as e:
             print(f"读取图像失败: {image_path} - {e}")
+            print(f"  索引: {idx}")
+            print(f"  浓度值: {concentration}")
+            print(f"  元数据: {metadata}")
             # 返回一个占位图像
             if self.transform:
                 placeholder = self.transform(Image.new('RGB', (224, 224), color='black'))
@@ -456,7 +549,8 @@ def create_feature_dataloader(feature_dataset_path: str = None,
                              power_filter: Optional[str] = None,
                              concentration_range: Optional[Tuple[float, float]] = None,
                              image_size: int = 224,
-                             dataset_version: str = 'latest') -> Tuple[DataLoader, FeatureImageDataset]:
+                             dataset_version: str = 'latest',
+                             collate_fn: Optional[Callable] = None) -> Tuple[DataLoader, FeatureImageDataset]:
     """
     创建特征数据集加载器（支持版本选择）
     
@@ -469,9 +563,10 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         concentration_range: 浓度过滤范围 (min, max)
         image_size: 图像尺寸
         dataset_version: 数据集版本 ('v1', 'v2', 'v3', 'v4', 'latest')
+        collate_fn: 自定义collate函数，用于定义批次数据的组织方式
         
     Returns:
-        (DataLoader, Dataset)
+        (DataLoader, Dataset) 其中DataLoader使用指定的collate_fn组织批次数据
     """
     
     # 自动检测数据集
@@ -526,7 +621,8 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=collate_fn
     )
     
     print(f"✅ 特征数据加载器创建完成")

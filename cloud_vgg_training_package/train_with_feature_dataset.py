@@ -79,7 +79,13 @@ def safe_collate_fn(batch):
         concentrations = []
         metadata = []
         
-        for item in batch:
+        # 添加调试信息
+        if len(batch) > 0 and len(batch[0]) != 3:
+            print(f"警告: 批次元素格式异常，期望3个元素，实际批次大小: {len(batch)}")
+            for i, item in enumerate(batch[:3]):  # 只显示前3个元素
+                print(f"  批次元素 {i}: 类型={type(item)}, 长度={len(item) if hasattr(item, '__len__') else 'N/A'}, 内容={item}")
+        
+        for i, item in enumerate(batch):
             if len(item) == 3:
                 image, concentration, meta = item
                 images.append(image)
@@ -103,22 +109,24 @@ def safe_collate_fn(batch):
                         'distance': 'unknown'
                     })
             else:
-                raise ValueError(f"Unexpected item format: {len(item)} elements")
+                raise ValueError(f"Unexpected item format at index {i}: {len(item)} elements, item: {item}")
         
         # 使用默认的collate函数处理
         from torch.utils.data.dataloader import default_collate
         images_tensor = default_collate(images)
         concentrations_tensor = default_collate(concentrations)
         
+        # 添加返回值验证
+        if len(images_tensor) != len(concentrations_tensor):
+            print(f"警告: 返回张量大小不匹配，images: {len(images_tensor)}, concentrations: {len(concentrations_tensor)}")
+        
         return images_tensor, concentrations_tensor, metadata
         
     except Exception as e:
         print(f"Collate函数错误: {e}")
         print(f"批次大小: {len(batch)}")
-        if batch:
-            print(f"第一个元素类型: {type(batch[0])}")
-            if len(batch[0]) > 0:
-                print(f"第一个元素内容: {batch[0]}")
+        for i, item in enumerate(batch):
+            print(f"  批次元素 {i}: 类型={type(item)}, 长度={len(item) if hasattr(item, '__len__') else 'N/A'}, 内容={item}")
         raise
 
 
@@ -495,15 +503,32 @@ class FeatureDatasetTrainer:
         
         # 创建完整数据集
         self.logger.info("创建数据加载器...")
-        full_dataloader, full_dataset = create_feature_dataloader(
-            feature_dataset_path=self.args.feature_dataset_path,
-            batch_size=self.args.batch_size,
-            shuffle=False,  # 先不打乱，方便分割
-            bg_type=bg_filter,
-            power_filter=power_filter,
-            concentration_range=self.args.concentration_range,
-            image_size=self.args.image_size
-        )
+        try:
+            # 解析浓度范围参数
+            concentration_range = None
+            if self.args.concentration_range:
+                try:
+                    min_val, max_val = map(float, self.args.concentration_range.split(','))
+                    concentration_range = (min_val, max_val)
+                    self.logger.info(f"浓度范围过滤已启用: {min_val} - {max_val}")
+                except Exception as e:
+                    self.logger.error(f"浓度范围参数解析失败: {e}")
+                    self.logger.error("请使用格式 'min,max'，例如 '0,500'")
+                    raise
+            
+            full_dataloader, full_dataset = create_feature_dataloader(
+                feature_dataset_path=self.args.feature_dataset_path,
+                batch_size=self.args.batch_size,
+                shuffle=False,  # 先不打乱，方便分割
+                bg_type=bg_filter,
+                power_filter=power_filter,
+                concentration_range=concentration_range,
+                image_size=self.args.image_size,
+                collate_fn=safe_collate_fn  # 显式指定collate_fn以确保批次数据包含图像、浓度和元数据
+            )
+        except Exception as e:
+            self.logger.error(f"创建特征数据加载器失败: {e}")
+            raise
         
         self.logger.info(f"数据集加载完成，总样本数: {len(full_dataset)}")
         
@@ -516,31 +541,35 @@ class FeatureDatasetTrainer:
         from dataset_split_utils import split_dataset
         
         # 根据指定方法划分数据集
-        if self.args.split_method == 'random':
-            self.logger.info(f"使用随机划分方式 (训练比例: {self.args.train_ratio})")
-            train_dataset, val_dataset = split_dataset(
-                full_dataset, 
-                split_method='random', 
-                train_ratio=self.args.train_ratio,
-                seed=42
-            )
-        elif self.args.split_method == 'stratified':
-            self.logger.info(f"使用按浓度分层抽样划分方式 (训练比例: {self.args.train_ratio})")
-            train_dataset, val_dataset = split_dataset(
-                full_dataset, 
-                split_method='stratified', 
-                train_ratio=self.args.train_ratio,
-                seed=42
-            )
-        elif self.args.split_method == 'interval':
-            self.logger.info(f"使用按浓度间隔分配划分方式 (训练间隔长度: {self.args.train_interval_length}, 验证间隔长度: {self.args.val_interval_length})")
-            train_dataset, val_dataset = split_dataset(
-                full_dataset, 
-                split_method='interval', 
-                train_interval_length=self.args.train_interval_length,
-                val_interval_length=self.args.val_interval_length,
-                seed=42
-            )
+        try:
+            if self.args.split_method == 'random':
+                self.logger.info(f"使用随机划分方式 (训练比例: {self.args.train_ratio})")
+                train_dataset, val_dataset = split_dataset(
+                    full_dataset, 
+                    split_method='random', 
+                    train_ratio=self.args.train_ratio,
+                    seed=42
+                )
+            elif self.args.split_method == 'stratified':
+                self.logger.info(f"使用按浓度分层抽样划分方式 (训练比例: {self.args.train_ratio})")
+                train_dataset, val_dataset = split_dataset(
+                    full_dataset, 
+                    split_method='stratified', 
+                    train_ratio=self.args.train_ratio,
+                    seed=42
+                )
+            elif self.args.split_method == 'interval':
+                self.logger.info(f"使用按浓度间隔分配划分方式 (训练间隔长度: {self.args.train_interval_length}, 验证间隔长度: {self.args.val_interval_length})")
+                train_dataset, val_dataset = split_dataset(
+                    full_dataset, 
+                    split_method='interval', 
+                    train_interval_length=self.args.train_interval_length,
+                    val_interval_length=self.args.val_interval_length,
+                    seed=42
+                )
+        except Exception as e:
+            self.logger.error(f"数据集分割失败: {e}")
+            raise
         
         train_size = len(train_dataset)
         val_size = len(val_dataset)
@@ -1279,38 +1308,63 @@ class FeatureDatasetTrainer:
         total_batches = len(self.train_loader)
         log_interval = max(1, total_batches // 10)  # 每10%输出一次
         
-        for batch_idx, (images, targets, metadata) in enumerate(self.train_loader):
-            images = images.to(self.device)
-            targets = targets.to(self.device).float()
+        for batch_idx, batch_data in enumerate(self.train_loader):
+            try:
+                # 尝试解包数据
+                if len(batch_data) == 3:
+                    images, targets, metadata = batch_data
+                elif len(batch_data) == 2:
+                    images, targets = batch_data
+                    metadata = None
+                else:
+                    raise ValueError(f"意外的数据批次格式: {len(batch_data)} 个元素")
+                
+                # 添加调试信息
+                if batch_idx == 0:  # 只在第一个批次显示
+                    print(f"训练数据批次格式: {len(batch_data)} 个元素")
+                    print(f"  images类型: {type(images)}, 形状: {getattr(images, 'shape', 'N/A')}")
+                    print(f"  targets类型: {type(targets)}, 形状: {getattr(targets, 'shape', 'N/A')}")
+                    print(f"  metadata类型: {type(metadata)}")
+                    
+                images = images.to(self.device)
+                targets = targets.to(self.device).float()
             
-            # 前向传播
-            self.optimizer.zero_grad()
-            outputs = self.model(images)
-            # 处理模型输出（可能是tuple）
-            if isinstance(outputs, tuple):
-                outputs = outputs[0]  # 取主输出
-            
-            # 针对不同模型调整目标值形状以避免广播警告
-            if self.args.model_type == 'resnet50':
-                # ResNet50输出标量，目标值也应为标量
-                loss = self.criterion(outputs.squeeze(), targets.squeeze())
-            else:
-                # 其他模型保持原有处理方式
-                loss = self.criterion(outputs.squeeze(), targets)
-            
-            # 反向传播
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            # 详细进度输出
-            if batch_idx % log_interval == 0:
-                progress = (batch_idx + 1) / total_batches * 100
-                avg_loss = total_loss / num_batches
-                self.logger.info(f"   训练进度: {batch_idx+1}/{total_batches} ({progress:.1f}%) - "
-                               f"当前损失: {loss.item():.6f}, 平均损失: {avg_loss:.6f}")
+                
+                # 前向传播
+                self.optimizer.zero_grad()
+                outputs = self.model(images)
+                # 处理模型输出（可能是tuple）
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]  # 取主输出
+                
+                # 针对不同模型调整目标值形状以避免广播警告
+                if self.args.model_type == 'resnet50':
+                    # ResNet50输出标量，目标值也应为标量
+                    loss = self.criterion(outputs.squeeze(), targets.squeeze())
+                else:
+                    # 其他模型保持原有处理方式
+                    loss = self.criterion(outputs.squeeze(), targets)
+                
+                # 反向传播
+                loss.backward()
+                self.optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+                # 详细进度输出
+                if batch_idx % log_interval == 0:
+                    progress = (batch_idx + 1) / total_batches * 100
+                    avg_loss = total_loss / num_batches
+                    self.logger.info(f"   训练进度: {batch_idx+1}/{total_batches} ({progress:.1f}%) - "
+                                   f"当前损失: {loss.item():.6f}, 平均损失: {avg_loss:.6f}")
+            except Exception as e:
+                self.logger.error(f"训练过程中发生错误在批次 {batch_idx}: {e}")
+                self.logger.error(f"图像张量形状: {images.shape if 'images' in locals() else 'N/A'}")
+                self.logger.error(f"目标张量形状: {targets.shape if 'targets' in locals() else 'N/A'}")
+                if 'outputs' in locals():
+                    self.logger.error(f"输出张量形状: {outputs.shape if isinstance(outputs, torch.Tensor) else 'N/A'}")
+                raise
         
         avg_loss = total_loss / num_batches
         return avg_loss
@@ -1326,42 +1380,66 @@ class FeatureDatasetTrainer:
         val_batches = len(self.val_loader)
         
         with torch.no_grad():
-            for batch_idx, (images, batch_targets, metadata) in enumerate(self.val_loader):
-                images = images.to(self.device)
-                batch_targets = batch_targets.to(self.device).float()
-                
-                outputs = self.model(images)
-                # 处理模型输出（可能是tuple）
-                if isinstance(outputs, tuple):
-                    outputs = outputs[0]  # 取主输出
-                
-                # 针对不同模型调整目标值形状以避免广播警告
-                if self.args.model_type == 'resnet50':
-                    # ResNet50输出标量，目标值也应为标量
-                    loss = self.criterion(outputs.squeeze(), batch_targets.squeeze())
-                else:
-                    # 其他模型保持原有处理方式
-                    loss = self.criterion(outputs.squeeze(), batch_targets)
-                
-                total_loss += loss.item()
-                
-                # 安全处理预测值和目标值，避免0维数组问题
-                pred_numpy = outputs.squeeze().cpu().numpy()
-                target_numpy = batch_targets.cpu().numpy()
-                
-                # 确保是1维数组，即使batch_size=1
-                if pred_numpy.ndim == 0:
-                    pred_numpy = np.array([pred_numpy])
-                if target_numpy.ndim == 0:
-                    target_numpy = np.array([target_numpy])
+            for batch_idx, batch_data in enumerate(self.val_loader):
+                try:
+                    # 尝试解包数据
+                    if len(batch_data) == 3:
+                        images, batch_targets, metadata = batch_data
+                    elif len(batch_data) == 2:
+                        images, batch_targets = batch_data
+                        metadata = None
+                    else:
+                        raise ValueError(f"意外的数据批次格式: {len(batch_data)} 个元素")
                     
-                predictions.extend(pred_numpy)
-                targets.extend(target_numpy)
-                
-                # 验证进度
-                if batch_idx % max(1, val_batches // 5) == 0:
-                    progress = (batch_idx + 1) / val_batches * 100
-                    self.logger.info(f"   验证进度: {batch_idx+1}/{val_batches} ({progress:.1f}%)")
+                    # 添加调试信息
+                    if batch_idx == 0:  # 只在第一个批次显示
+                        print(f"验证数据批次格式: {len(batch_data)} 个元素")
+                        print(f"  images类型: {type(images)}, 形状: {getattr(images, 'shape', 'N/A')}")
+                        print(f"  batch_targets类型: {type(batch_targets)}, 形状: {getattr(batch_targets, 'shape', 'N/A')}")
+                        print(f"  metadata类型: {type(metadata)}")
+                        
+                    images = images.to(self.device)
+                    batch_targets = batch_targets.to(self.device).float()
+                    
+                    outputs = self.model(images)
+                    # 处理模型输出（可能是tuple）
+                    if isinstance(outputs, tuple):
+                        outputs = outputs[0]  # 取主输出
+                    
+                    # 针对不同模型调整目标值形状以避免广播警告
+                    if self.args.model_type == 'resnet50':
+                        # ResNet50输出标量，目标值也应为标量
+                        loss = self.criterion(outputs.squeeze(), batch_targets.squeeze())
+                    else:
+                        # 其他模型保持原有处理方式
+                        loss = self.criterion(outputs.squeeze(), batch_targets)
+                    
+                    total_loss += loss.item()
+                    
+                    # 安全处理预测值和目标值，避免0维数组问题
+                    pred_numpy = outputs.squeeze().cpu().numpy()
+                    target_numpy = batch_targets.cpu().numpy()
+                    
+                    # 确保是1维数组，即使batch_size=1
+                    if pred_numpy.ndim == 0:
+                        pred_numpy = np.array([pred_numpy])
+                    if target_numpy.ndim == 0:
+                        target_numpy = np.array([target_numpy])
+                        
+                    predictions.extend(pred_numpy)
+                    targets.extend(target_numpy)
+                    
+                    # 验证进度
+                    if batch_idx % max(1, val_batches // 5) == 0:
+                        progress = (batch_idx + 1) / val_batches * 100
+                        self.logger.info(f"   验证进度: {batch_idx+1}/{val_batches} ({progress:.1f}%)")
+                except Exception as e:
+                    self.logger.error(f"验证过程中发生错误在批次 {batch_idx}: {e}")
+                    self.logger.error(f"图像张量形状: {images.shape if 'images' in locals() else 'N/A'}")
+                    self.logger.error(f"目标张量形状: {batch_targets.shape if 'batch_targets' in locals() else 'N/A'}")
+                    if 'outputs' in locals():
+                        self.logger.error(f"输出张量形状: {outputs.shape if isinstance(outputs, torch.Tensor) else 'N/A'}")
+                    raise
         
         avg_loss = total_loss / len(self.val_loader)
         
@@ -1748,11 +1826,11 @@ def main():
                        help='训练集比例 (默认: 0.8)')
     parser.add_argument('--split_method', type=str, default='random',
                        choices=['random', 'stratified', 'interval'],
-                       help='数据集划分方式: random(随机), stratified(按浓度分层), interval(按浓度间隔)')
+                       help='数据集划分方式: random(随机), stratified(按浓度分层), interval(按浓度比例4:1分配)')
     parser.add_argument('--train_interval_length', type=int, default=4,
-                       help='训练集浓度间隔长度 (仅在split_method=interval时有效)')
+                       help='训练集浓度间隔长度 (仅在split_method=interval时有效，固定为4)')
     parser.add_argument('--val_interval_length', type=int, default=1,
-                       help='验证集浓度间隔长度 (仅在split_method=interval时有效)')
+                       help='验证集浓度间隔长度 (仅在split_method=interval时有效，固定为1)')
     parser.add_argument('--image_size', type=int, default=224,
                        help='输入图像尺寸 (默认224)')
 
