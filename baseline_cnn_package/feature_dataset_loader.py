@@ -147,29 +147,53 @@ class FeatureImageDataset(Dataset):
                 
                 # 如果没有浓度信息，尝试从文件名解析
                 if concentration is None:
-                    # 从文件名解析信息
-                    # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
                     filename = os.path.basename(image_file)
-                    parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
-                    if len(parts) >= 6:
+                    # 尝试解析新的数据集格式: 15deg-<角度>-<距离>m-<浓度>-bg1-400mw-<序号>_cropped.jpg
+                    if filename.startswith('15deg-') and '_cropped.jpg' in filename:
                         try:
-                            concentration = float(parts[1])  # 悬浮物浓度是第二个部分
-                            # 更新元数据
-                            info_data['concentration'] = concentration
-                            # 如果背景类型缺失，也从文件名解析
-                            if bg_type is None:
-                                bg_type = parts[4]  # 背景补光与否是第五个部分
-                                info_data['bg_type'] = bg_type
-                            # 如果功率缺失，也从文件名解析
-                            if power is None:
-                                power = parts[5]  # 激光光强是第六个部分
-                                info_data['power'] = power
+                            # 移除前缀和后缀
+                            name_part = filename.replace('15deg-', '').replace('_cropped.jpg', '')
+                            parts = name_part.split('-')
+                            if len(parts) >= 5:
+                                # 浓度是第四个部分
+                                concentration = float(parts[3])
+                                # 更新元数据
+                                info_data['concentration'] = concentration
+                                # 背景类型和功率是固定的
+                                if bg_type is None:
+                                    bg_type = 'bg1'
+                                    info_data['bg_type'] = bg_type
+                                if power is None:
+                                    power = '400mw'
+                                    info_data['power'] = power
+                            else:
+                                concentration = 0.0
                         except ValueError:
                             # 如果解析失败，使用默认值0.0
                             concentration = 0.0
+                    # 否则使用旧的解析方法
                     else:
-                        # 如果文件名格式不正确，使用默认值0.0
-                        concentration = 0.0
+                        # 文件名格式: feature_入射角度-悬浮物浓度-相机高度-水体流速-背景补光与否-激光光强.jpg
+                        parts = filename.replace('feature_', '').replace('.jpg', '').split('-')
+                        if len(parts) >= 6:
+                            try:
+                                concentration = float(parts[1])  # 悬浮物浓度是第二个部分
+                                # 更新元数据
+                                info_data['concentration'] = concentration
+                                # 如果背景类型缺失，也从文件名解析
+                                if bg_type is None:
+                                    bg_type = parts[4]  # 背景补光与否是第五个部分
+                                    info_data['bg_type'] = bg_type
+                                # 如果功率缺失，也从文件名解析
+                                if power is None:
+                                    power = parts[5]  # 激光光强是第六个部分
+                                    info_data['power'] = power
+                            except ValueError:
+                                # 如果解析失败，使用默认值0.0
+                                concentration = 0.0
+                        else:
+                            # 如果文件名格式不正确，使用默认值0.0
+                            concentration = 0.0
                 else:
                     concentration = float(concentration)
                 
@@ -438,7 +462,8 @@ def create_feature_dataloader(feature_dataset_path: str = None,
                              power_filter: Optional[str] = None,
                              concentration_range: Optional[Tuple[float, float]] = None,
                              image_size: int = 224,
-                             dataset_version: str = 'latest') -> Tuple[DataLoader, FeatureImageDataset]:
+                             dataset_version: str = 'latest',
+                             collate_fn: Optional[Callable] = None) -> Tuple[DataLoader, FeatureImageDataset]:
     """
     创建特征数据集加载器（支持版本选择）
     
@@ -448,12 +473,13 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         shuffle: 是否打乱数据
         bg_type: 过滤特定背景类型 ('bg0', 'bg1')
         power_filter: 过滤特定功率 ('20mw', '100mw', '400mw')
-        concentration_range: 浓度范围过滤 (min_concentration, max_concentration)
+        concentration_range: 浓度过滤范围 (min, max)
         image_size: 图像尺寸
         dataset_version: 数据集版本 ('v1', 'v2', 'v3', 'v4', 'latest')
+        collate_fn: 自定义collate函数，用于定义批次数据的组织方式
         
     Returns:
-        (DataLoader, Dataset)
+        (DataLoader, Dataset) 其中DataLoader使用指定的collate_fn组织批次数据
     """
     
     # 自动检测数据集
@@ -508,7 +534,8 @@ def create_feature_dataloader(feature_dataset_path: str = None,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=collate_fn
     )
     
     print(f"✅ 特征数据加载器创建完成")
@@ -516,8 +543,6 @@ def create_feature_dataloader(feature_dataset_path: str = None,
     print(f"   批次大小: {batch_size}")
     print(f"   样本总数: {len(dataset)}")
     print(f"   批次数量: {len(dataloader)}")
-    if concentration_range:
-        print(f"   浓度范围过滤: {concentration_range[0]:.1f} - {concentration_range[1]:.1f}")
     
     return dataloader, dataset
 
